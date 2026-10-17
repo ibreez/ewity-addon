@@ -1,0 +1,240 @@
+{
+  "bills": [
+    {
+      "id": 8634,
+      "parent_id": null,
+      "number": "B/8634",
+      "location": {
+        "id": 1,
+        "name": "Harbor Wharf Bistro (Store #101)",
+        "display_name": "HWB Pier 24",
+        "type": "restaurant",
+        "qr_menu_url": "https://my.ewity.com/qr/hwb-pier24"
+      },
+      "customer": {
+        "id": 104,
+        "name": "Alexander Reed",
+        "mobile": "+1-555-019-8321"
+      },
+      "register_name": "Hot Line Register #1",
+      "restaurant_table": "T-04",
+      "total_sales_price": 68.5,
+      "total_tax": 5.48,
+      "total_outstanding": 0,
+      "total": 73.98,
+      "currency": "USD",
+      "status": "settled",
+      "payment_status": "paid",
+      "delivery_status": null,
+      "ui_status": {
+        "text": "Settled",
+        "color": "green",
+        "hex": "#48BB78"
+      },
+      "ui_payment_status": {
+        "text": "Paid",
+        "color": "green",
+        "hex": "#48BB78"
+      },
+      "type": "sale",
+      "sub_type": null,
+      "date": "2026-10-17",
+      "created": {
+        "at": "2026-10-17 09:11:18",
+        "by": "Elena Ramos"
+      },
+      "kot_number": "KOT-9901"
+    },
+    {
+      "id": 8635,
+      "parent_id": null,
+      "number": "B/8635",
+      "location": {
+        "id": 1,
+        "name": "Harbor Wharf Bistro (Store #101)",
+        "display_name": "HWB Pier 24",
+        "type": "restaurant"
+      },
+      "customer": null,
+      "register_name": "Main Dining Bar Register",
+      "restaurant_table": "T-12",
+      "total_sales_price": 112,
+      "total_tax": 8.96,
+      "total_outstanding": 120.96,
+      "total": 120.96,
+      "currency": "USD",
+      "status": "settled",
+      "payment_status": "payment-pending",
+      "delivery_status": null,
+      "ui_status": {
+        "text": "Settled",
+        "color": "green",
+        "hex": "#48BB78"
+      },
+      "ui_payment_status": {
+        "text": "Pending",
+        "color": "amber",
+        "hex": "#D97706"
+      },
+      "type": "sale",
+      "date": "2026-10-17",
+      "created": {
+        "at": "2026-10-17 08:57:53",
+        "by": "Marcus Vance"
+      },
+      "kot_number": "KOT-9889"
+    },
+    {
+      "id": 8636,
+      "parent_id": null,
+      "number": "B/8636",
+      "location": {
+        "id": 1,
+        "name": "Harbor Wharf Bistro (Store #101)",
+        "display_name": "HWB Pier 24",
+        "type": "restaurant"
+      },
+      "customer": {
+        "id": 108,
+        "name": "Sophia Zhang",
+        "mobile": "+1-555-014-9922"
+      },
+      "register_name": "Online Gateway",
+      "restaurant_table": null,
+      "total_sales_price": 45,
+      "total_tax": 3.6,
+      "total_outstanding": 0,
+      "total": 48.6,
+      "currency": "USD",
+      "status": "settled",
+      "payment_status": "paid",
+      "delivery_status": "pending",
+      "ui_status": {
+        "text": "Settled",
+        "color": "green",
+        "hex": "#48BB78"
+      },
+      "type": "sale",
+      "sub_type": "online",
+      "date": "2026-10-17",
+      "created": {
+        "at": "2026-10-17 09:05:53",
+        "by": "Ewity Online Storefront"
+      },
+      "kot_number": "KOT-9912"
+    }
+  ],
+  "orders": [
+    {
+      "id": "ewity-9001",
+      "orderNumber": "B/9001",
+      "source": "Online",
+      "orderType": "Delivery",
+      "tableNumber": "T-01",
+      "createdAt": 1792238400000,
+      "kotNumber": "KOT-1111",
+      "kotStatus": "Awaiting Confirmation",
+      "kotStation": "Hot Line #1 Station",
+      "orderStatus": "New",
+      "statusUpdatedAt": 1792228384337,
+      "items": [
+        {
+          "id": "bill-item-9001",
+          "name": "Bill B/9001 Items (sale)",
+          "quantity": 1,
+          "price": 35.5,
+          "category": "Mains"
+        }
+      ],
+      "totalAmount": 35.5,
+      "guestCount": 1,
+      "serverName": "Server 1",
+      "locationId": "1",
+      "alertSeverity": "nominal",
+      "activeAlertIds": []
+    },
+    {
+      "id": "ewity-8634",
+      "orderNumber": "B/8634",
+      "source": "POS",
+      "orderType": "Dine-in",
+      "tableNumber": "T-04",
+      "createdAt": 1792228278000,
+      "kotNumber": "KOT-9901",
+      "kotStatus": "Awaiting Confirmation",
+      "kotStation": "Harbor Wharf Bistro (Store #101) Station",
+      "orderStatus": "New",
+      "statusUpdatedAt": 1792228373563,
+      "items": [
+        {
+          "id": "bill-item-8634",
+          "name": "Bill B/8634 Items (sale)",
+          "quantity": 1,
+          "price": 73.98,
+          "category": "Mains"
+        }
+      ],
+      "totalAmount": 73.98,
+      "guestCount": 2,
+      "serverName": "Elena Ramos",
+      "locationId": "1",
+      "alertSeverity": "nominal",
+      "activeAlertIds": []
+    },
+    {
+      "id": "ewity-8635",
+      "orderNumber": "B/8635",
+      "source": "POS",
+      "orderType": "Dine-in",
+      "tableNumber": "T-12",
+      "createdAt": 1792227473000,
+      "kotNumber": "KOT-9889",
+      "kotStatus": "Awaiting Confirmation",
+      "kotStation": "Harbor Wharf Bistro (Store #101) Station",
+      "orderStatus": "New",
+      "statusUpdatedAt": 1792228373563,
+      "items": [
+        {
+          "id": "bill-item-8635",
+          "name": "Bill B/8635 Items (sale)",
+          "quantity": 1,
+          "price": 120.96,
+          "category": "Mains"
+        }
+      ],
+      "totalAmount": 120.96,
+      "guestCount": 2,
+      "serverName": "Marcus Vance",
+      "locationId": "1",
+      "alertSeverity": "nominal",
+      "activeAlertIds": []
+    },
+    {
+      "id": "ewity-8636",
+      "orderNumber": "B/8636",
+      "source": "Online",
+      "orderType": "Delivery",
+      "createdAt": 1792227953000,
+      "kotNumber": "KOT-9912",
+      "kotStatus": "Awaiting Confirmation",
+      "kotStation": "Harbor Wharf Bistro (Store #101) Station",
+      "orderStatus": "New",
+      "statusUpdatedAt": 1792228373563,
+      "items": [
+        {
+          "id": "bill-item-8636",
+          "name": "Bill B/8636 Items (sale)",
+          "quantity": 1,
+          "price": 48.6,
+          "category": "Mains"
+        }
+      ],
+      "totalAmount": 48.6,
+      "guestCount": 1,
+      "serverName": "Ewity Online Storefront",
+      "locationId": "1",
+      "alertSeverity": "nominal",
+      "activeAlertIds": []
+    }
+  ]
+}
