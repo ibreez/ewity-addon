@@ -20,6 +20,7 @@ export interface RequestLog {
   statusCode?: number;
   durationMs: number;
   error?: string;
+  note?: string;
 }
 
 export class EwityApiClient {
@@ -29,6 +30,8 @@ export class EwityApiClient {
   private timeoutMs: number;
   private maxRetries: number;
   private recentLogs: RequestLog[] = [];
+  private isAppAccessAuthorized: boolean | null = null;
+  private lastSuccessfulApiRequestAt: number | null = null;
 
   constructor(config: EwityClientConfig) {
     this.baseUrl = (config.baseUrl || 'https://api.ewitypos.com/apps-v1').replace(/\/$/, '');
@@ -38,14 +41,27 @@ export class EwityApiClient {
     this.maxRetries = config.maxRetries || 3;
   }
 
+  public getLastSuccessfulApiRequestAt(): number | null {
+    return this.lastSuccessfulApiRequestAt;
+  }
+
   public updateCredentials(apiKey: string, storeId: string, baseUrl?: string) {
     this.apiKey = apiKey;
+    this.isAppAccessAuthorized = null;
     if (storeId && !storeId.startsWith('http')) {
       this.storeId = storeId;
     }
     if (baseUrl && baseUrl.startsWith('http')) {
       this.baseUrl = baseUrl.replace(/\/$/, '');
     }
+  }
+
+  public hasAuthorizedAppAccess(): boolean {
+    return this.isAppAccessAuthorized !== false;
+  }
+
+  public resetAppAccessState() {
+    this.isAppAccessAuthorized = null;
   }
 
   public isPlatformMode(): boolean {
@@ -67,6 +83,7 @@ export class EwityApiClient {
       hasApiKey: Boolean(this.apiKey),
       hasStoreId: Boolean(this.storeId),
       isPlatformMode: this.isPlatformMode(),
+      isAppAccessAuthorized: this.isAppAccessAuthorized,
     };
   }
 
@@ -80,7 +97,11 @@ export class EwityApiClient {
       this.recentLogs.pop();
     }
     // Safe structured logging to stdout (never print secrets)
-    console.log(`[EWITY-API] ${entry.method} ${entry.path} - Status: ${entry.statusCode || 'ERR'} (${entry.durationMs}ms) ${entry.error ? `Error: ${entry.error}` : ''}`);
+    if (entry.note) {
+      console.log(`[EWITY-API] ${entry.method} ${entry.path} - Status: ${entry.statusCode || 200} (${entry.durationMs}ms) Notice: ${entry.note}`);
+    } else {
+      console.log(`[EWITY-API] ${entry.method} ${entry.path} - Status: ${entry.statusCode || 'ERR'} (${entry.durationMs}ms) ${entry.error ? `Error: ${entry.error}` : ''}`);
+    }
   }
 
   /**
@@ -180,6 +201,29 @@ export class EwityApiClient {
           errorBody = await response.text();
         }
 
+        const isAppAccessPending =
+          statusCode === 401 &&
+          (errorBody.includes('not authorized app access') ||
+            errorBody.includes('approve its permissions') ||
+            errorBody.includes('must install the app'));
+
+        if (isAppAccessPending) {
+          this.isAppAccessAuthorized = false;
+          this.log({
+            timestamp: new Date().toISOString(),
+            method: options.method || 'GET',
+            path,
+            statusCode: 401,
+            durationMs,
+            note: 'Store app access approval pending in Ewity POS. Fallback monitoring active.',
+          });
+
+          const pendingErr: any = new Error(`Ewity store app installation pending: ${errorBody}`);
+          pendingErr.isAppAccessPending = true;
+          pendingErr.alreadyLogged = true;
+          throw pendingErr;
+        }
+
         const errMsg = `HTTP ${statusCode}: ${errorBody || response.statusText}`;
         this.log({
           timestamp: new Date().toISOString(),
@@ -190,16 +234,18 @@ export class EwityApiClient {
           error: errMsg,
         });
 
-        if (statusCode === 401) {
-          throw new Error(`Ewity 401 Unauthorized: Invalid or expired API credentials. ${errorBody}`);
-        }
-        if (statusCode === 403) {
-          throw new Error(`Ewity 403 Forbidden: Missing approved role permission on merchant store. ${errorBody}`);
-        }
-        throw new Error(errMsg);
+        const httpErr: any =
+          statusCode === 401
+            ? new Error(`Ewity 401 Unauthorized: Invalid or expired API credentials. ${errorBody}`)
+            : statusCode === 403
+            ? new Error(`Ewity 403 Forbidden: Missing approved role permission on merchant store. ${errorBody}`)
+            : new Error(errMsg);
+        httpErr.alreadyLogged = true;
+        throw httpErr;
       }
 
       const data = await response.json();
+      this.lastSuccessfulApiRequestAt = Date.now();
       this.log({
         timestamp: new Date().toISOString(),
         method: options.method || 'GET',
@@ -228,14 +274,16 @@ export class EwityApiClient {
         return this.executeRequest<T>(path, options, attempt + 1);
       }
 
-      this.log({
-        timestamp: new Date().toISOString(),
-        method: options.method || 'GET',
-        path,
-        durationMs,
-        error: errMsg,
-      });
-      throw new Error(errMsg);
+      if (!err.alreadyLogged) {
+        this.log({
+          timestamp: new Date().toISOString(),
+          method: options.method || 'GET',
+          path,
+          durationMs,
+          error: errMsg,
+        });
+      }
+      throw err;
     }
   }
 
@@ -306,6 +354,7 @@ export class EwityApiClient {
       }
 
       const result = await response.json();
+      this.lastSuccessfulApiRequestAt = Date.now();
       this.log({
         timestamp: new Date().toISOString(),
         method: 'GET',
@@ -426,6 +475,19 @@ export class EwityApiClient {
       q_payment_status?: string;
     } = {}
   ): Promise<EwityBillListResponse> {
+    if (this.isAppAccessAuthorized === false) {
+      return {
+        data: [],
+        pagination: {
+          pageSize: params.limit || 20,
+          current: params.page || 1,
+          total: 0,
+          hasMorePages: false,
+        },
+        appAccessPending: true,
+      };
+    }
+
     const query = new URLSearchParams();
     if (params.page) query.set('page', String(params.page));
     if (params.limit) query.set('limit', String(params.limit));
@@ -457,10 +519,12 @@ export class EwityApiClient {
           hasMorePages: Boolean(pagination.hasMorePages),
         },
         search: res.search,
+        appAccessPending: false,
       };
     } catch (err: any) {
       // If store app access is not yet approved in App Store, return empty list gracefully
       if (
+        err.isAppAccessPending ||
         err.message?.includes('not authorized app access') ||
         err.message?.includes('401') ||
         err.message?.includes('403') ||
@@ -469,6 +533,7 @@ export class EwityApiClient {
         return {
           data: [],
           pagination: { pageSize: params.limit || 20, current: params.page || 1, total: 0, hasMorePages: false },
+          appAccessPending: true,
         };
       }
       throw err;

@@ -34,7 +34,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   activeOrdersCount,
   totalOrdersCount,
   stationName,
-  ewityConnectionStatus = 'Demo Mode',
+  ewityConnectionStatus = 'NOT CONNECTED',
 }) => {
   return (
     <aside className="w-64 bg-slate-900 text-slate-300 border-r border-slate-800 flex flex-col justify-between shrink-0 min-h-[calc(100vh-61px)]">
@@ -191,7 +191,15 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span>Gateway State</span>
             <span
               className={`font-mono font-medium ${
-                ewityConnectionStatus === 'Connected' ? 'text-emerald-400' : 'text-amber-400'
+                ewityConnectionStatus === 'LIVE CONNECTED'
+                  ? 'text-emerald-400'
+                  : ewityConnectionStatus === 'DEMO MODE'
+                  ? 'text-amber-400'
+                  : ewityConnectionStatus === 'LIVE DATA STALE'
+                  ? 'text-amber-300'
+                  : ewityConnectionStatus === 'PERMISSION ERROR' || ewityConnectionStatus === 'CONNECTION ERROR'
+                  ? 'text-rose-400'
+                  : 'text-slate-400'
               }`}
             >
               {ewityConnectionStatus}

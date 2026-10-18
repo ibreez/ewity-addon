@@ -186,8 +186,8 @@ export function evaluateMonitoringRules(
     };
   });
 
-  // Rule 4: Connection Interruption Alert
-  if (connectionStatus === 'demo_interrupted') {
+  // Rule 4: Connection Interruption or Stale Data Alert
+  if (connectionStatus === 'CONNECTION ERROR' || connectionStatus === 'LIVE DATA STALE') {
     const connAlertId = 'alt-conn-interrupted';
     const existing = existingAlertsMap.get(connAlertId);
     generatedAlerts.push({

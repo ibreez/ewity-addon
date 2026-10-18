@@ -167,13 +167,17 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                   {/* Status Badge */}
                   <span
                     className={`px-2.5 py-0.5 rounded text-xs font-bold border ${
-                      status === 'Connected'
+                      status === 'LIVE CONNECTED'
                         ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                        : status === 'DEMO MODE'
+                        ? 'bg-amber-100 text-amber-900 border-amber-300'
                         : status === 'Connecting'
                         ? 'bg-blue-50 text-blue-800 border-blue-300'
-                        : status === 'Connection Error'
+                        : status === 'LIVE DATA STALE'
+                        ? 'bg-amber-50 text-amber-800 border-amber-300'
+                        : status === 'CONNECTION ERROR' || status === 'PERMISSION ERROR'
                         ? 'bg-red-50 text-red-800 border-red-300'
-                        : 'bg-amber-50 text-amber-900 border-amber-300'
+                        : 'bg-slate-100 text-slate-700 border-slate-300'
                     }`}
                   >
                     {status}
@@ -196,7 +200,7 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
               <span>Refresh Status</span>
             </button>
 
-            {status === 'Connected' ? (
+            {status === 'LIVE CONNECTED' || status === 'LIVE DATA STALE' ? (
               <button
                 onClick={onDisconnect}
                 className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-semibold border border-slate-300"
@@ -215,15 +219,15 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
         </div>
 
         {/* Live Warning if not connected */}
-        {status !== 'Connected' && (
+        {status !== 'LIVE CONNECTED' && (
           <div className="mt-4 p-3 bg-amber-50/80 border border-amber-200 rounded-lg text-xs text-amber-900 flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
             <div>
               <p className="font-semibold">
-                Running in Verified Demo & Mock Sandbox Mode
+                Status: {status}
               </p>
               <p className="text-[11px] text-amber-800 mt-0.5 leading-relaxed">
-                As required by Phase 2 guidelines: <em>"Never show Connected unless a real authenticated API request succeeds."</em> To connect to a live merchant, provide valid <code className="font-mono">EWITY_APP_API_KEY</code> and <code className="font-mono">EWITY_STORE_ID</code> credentials below. All mock fixtures and OpenAPI schemas below verify against official documentation.
+                As required: <em>&quot;Never show Connected unless a real authenticated API request succeeds.&quot;</em> To connect to a live merchant, provide valid <code className="font-mono">EWITY_APP_API_KEY</code> and <code className="font-mono">EWITY_STORE_ID</code> credentials below. Zero fake data is displayed when disconnected.
               </p>
             </div>
           </div>

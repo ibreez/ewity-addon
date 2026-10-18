@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Order, OrderSource, OrderType, OrderStatus, KOTStatus, OrderItem } from '../types';
+import { Order, OrderSource, OrderType, OrderStatus, KOTStatus, OrderItem, OrderDataSource } from '../types';
 import { EwityBillSummary, EwityBillDetail } from '../types/ewity';
 
 /**
@@ -17,7 +17,8 @@ import { EwityBillSummary, EwityBillDetail } from '../types/ewity';
 export function mapEwityBillToOrder(
   bill: EwityBillSummary,
   detail?: EwityBillDetail,
-  existingOrder?: Order
+  existingOrder?: Order,
+  sourceType: OrderDataSource = 'ewity_api'
 ): Order {
   // 1. Distinguish source: POS vs Online
   // Online orders have sub_type === 'online' or delivery_status !== null or register_name indicating web/gateway
@@ -129,5 +130,7 @@ export function mapEwityBillToOrder(
     locationId: String(bill.location?.id || 'all'),
     alertSeverity: existingOrder ? existingOrder.alertSeverity : 'nominal',
     activeAlertIds: existingOrder ? existingOrder.activeAlertIds : [],
+    dataSource: sourceType,
+    dataTimestamp: Date.now(),
   };
 }

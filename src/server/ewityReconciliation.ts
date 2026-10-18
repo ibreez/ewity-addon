@@ -65,6 +65,10 @@ export class EwityReconciliationWorker {
       return { success: false, billsCount: 0, error: 'No Ewity credentials configured' };
     }
 
+    if (!this.client.hasAuthorizedAppAccess()) {
+      return { success: true, billsCount: 0 };
+    }
+
     if (this.stats.isRunning) {
       return { success: false, billsCount: 0, error: 'Reconciliation already in progress' };
     }
@@ -73,13 +77,15 @@ export class EwityReconciliationWorker {
     const startTime = Date.now();
 
     try {
-      console.log(`[EWITY-RECONCILER] Polling recent bills for location: ${this.locationId}`);
-      
       // Pull recent bills (e.g. limit 30, newest first)
       const response = await this.client.listBills(this.locationId, {
         limit: 30,
         order_by: 'created_at:desc',
       });
+
+      if (response.appAccessPending) {
+        return { success: true, billsCount: 0 };
+      }
 
       const bills = response.data || [];
       this.stats.lastRunAt = Date.now();

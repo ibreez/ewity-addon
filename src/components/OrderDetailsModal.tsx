@@ -156,7 +156,42 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
             </div>
           </div>
 
-          {/* KOT Printer Station Inspection Card */}
+          {/* Data Provenance Card */}
+          <div className="border border-slate-200 rounded-xl p-3 bg-slate-50 flex items-center justify-between text-xs">
+            <div>
+              <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider block">
+                Data Provenance
+              </span>
+              <div className="flex items-center gap-2 mt-0.5">
+                {order.dataSource === 'ewity_api' && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    Live Ewity Apps API
+                  </span>
+                )}
+                {order.dataSource === 'ewity_webhook' && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-purple-100 text-purple-800 border border-purple-300">
+                    Verified Ewity Webhook Event
+                  </span>
+                )}
+                {order.dataSource === 'persisted' && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-slate-200 text-slate-800 border border-slate-300">
+                    Persisted Local Cache
+                  </span>
+                )}
+                {order.dataSource === 'simulated_fixture' && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                    Simulated Test Fixture
+                  </span>
+                )}
+                <span className="text-slate-500 text-[11px]">
+                  Updated: {order.dataTimestamp ? formatClockTime(order.dataTimestamp) : formatClockTime(order.createdAt)}
+                </span>
+              </div>
+            </div>
+            <span className="text-[11px] font-mono text-slate-400">
+              Location: {order.locationId}
+            </span>
+          </div>
           <div className="border border-slate-200 rounded-xl p-4 bg-white space-y-3">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">

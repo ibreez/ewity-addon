@@ -16,7 +16,7 @@ import { EwityReconciliationWorker } from './src/server/ewityReconciliation';
 import { runEwityMockTestSuite, MOCK_EWITY_BILLS } from './src/server/ewityMockFixtures';
 import { mapEwityBillToOrder } from './src/services/ewityMapper';
 import { EwityLocation, EwityBillSummary, EwityConnectionInfo, EwityConnectionStatus } from './src/types/ewity';
-import { Order } from './src/types';
+import { Order, OrderDataSource } from './src/types';
 
 dotenv.config();
 
@@ -32,21 +32,43 @@ const SERVER_START_TIME = Date.now();
 const DATA_DIR = path.resolve('.data');
 const STATE_FILE = path.join(DATA_DIR, 'reconciled_state.json');
 
+/**
+ * Loads persisted genuine live state from disk.
+ * STRICT RULE: Never seeds with MOCK_EWITY_BILLS!
+ * If no saved genuine state exists, returns empty arrays.
+ */
 function loadPersistedState(): { bills: EwityBillSummary[]; orders: Order[] } {
   try {
     if (fs.existsSync(STATE_FILE)) {
       const content = fs.readFileSync(STATE_FILE, 'utf-8');
       const parsed = JSON.parse(content);
       if (Array.isArray(parsed.bills) && Array.isArray(parsed.orders)) {
-        return parsed;
+        // Hygiene filter: purge any legacy mock/simulated fixtures from disk
+        const genuineOrders = parsed.orders.filter(
+          (o: any) =>
+            o &&
+            o.dataSource !== 'simulated_fixture' &&
+            !String(o.id).startsWith('ord-4') &&
+            !String(o.orderNumber).startsWith('EW-4')
+        );
+        const genuineBills = parsed.bills.filter(
+          (b: any) =>
+            b &&
+            !String(b.id).startsWith('mock-') &&
+            b.id !== 9001 &&
+            b.id !== 8634 &&
+            b.id !== 8635 &&
+            b.id !== 8636
+        );
+        return { bills: genuineBills, orders: genuineOrders };
       }
     }
   } catch {
-    // Fall back to initial defaults
+    // Fall back to empty genuine defaults
   }
   return {
-    bills: [...MOCK_EWITY_BILLS],
-    orders: MOCK_EWITY_BILLS.map((b) => mapEwityBillToOrder(b)),
+    bills: [],
+    orders: [],
   };
 }
 
@@ -55,7 +77,9 @@ function persistState(bills: EwityBillSummary[], orders: Order[]) {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ bills, orders }, null, 2), 'utf-8');
+    // Only persist genuine records
+    const genuineOrders = orders.filter((o) => o && o.dataSource !== 'simulated_fixture');
+    fs.writeFileSync(STATE_FILE, JSON.stringify({ bills, orders: genuineOrders }, null, 2), 'utf-8');
   } catch (err) {
     console.warn('[EWITY-WATCHDOG] Failed to persist state to disk:', err);
   }
@@ -87,16 +111,19 @@ const appUiSigningSecret =
 
 const ewityAppUi = new EwityAppUiService(appUiSigningSecret, DEPLOYED_APP_URL);
 
-// In-memory store for reconciled live orders & bills (restored from disk if available)
+// In-memory store for reconciled live orders & bills (starts empty if no genuine saved state exists)
 const initialLoaded = loadPersistedState();
 let liveBillsCache: EwityBillSummary[] = initialLoaded.bills;
 let liveOrdersCache: Order[] = initialLoaded.orders;
 let lastSyncTimestamp: number | null = null;
-let currentConnectionStatus: EwityConnectionStatus = 'Demo Mode';
+let lastSuccessfulApiRequestAt: number | null = null;
+let lastSuccessfulReconciliationAt: number | null = null;
+let isDemoModeActive: boolean = false;
+let currentConnectionStatus: EwityConnectionStatus = ewityClient.hasCredentials() ? 'Connecting' : 'NOT CONNECTED';
 let currentCompanyInfo: any = null;
 let currentAuthorities: string[] = [];
 let cachedLocations: EwityLocation[] = [];
-let lastErrorMessage: string | undefined = undefined;
+let lastErrorMessage: string | undefined = ewityClient.hasCredentials() ? undefined : 'No Ewity credentials configured.';
 
 // Periodic reconciliation worker
 const reconciler = new EwityReconciliationWorker(
@@ -106,9 +133,11 @@ const reconciler = new EwityReconciliationWorker(
     liveBillsCache = reconciledBills;
     liveOrdersCache = reconciledBills.map((b) => {
       const existing = liveOrdersCache.find((o) => o.id === `ewity-${b.id}`);
-      return mapEwityBillToOrder(b, undefined, existing);
+      return mapEwityBillToOrder(b, undefined, existing, 'ewity_api');
     });
     lastSyncTimestamp = Date.now();
+    lastSuccessfulReconciliationAt = Date.now();
+    lastSuccessfulApiRequestAt = Date.now();
     persistState(liveBillsCache, liveOrdersCache);
   }
 );
@@ -150,20 +179,66 @@ async function startServer() {
   // ---------------------------------------------------------
 
   /**
+   * Helper to compute truthful current connection status and freshness.
+   */
+  function getTruthfulStatus(): { status: EwityConnectionStatus; isDataStale: boolean } {
+    if (isDemoModeActive) {
+      return { status: 'DEMO MODE', isDataStale: false };
+    }
+
+    if (!ewityClient.hasCredentials()) {
+      return { status: 'NOT CONNECTED', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'PERMISSION ERROR') {
+      return { status: 'PERMISSION ERROR', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'CONNECTION ERROR') {
+      return { status: 'CONNECTION ERROR', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'Connecting') {
+      return { status: 'Connecting', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'LIVE CONNECTED' || currentConnectionStatus === 'LIVE DATA STALE') {
+      // Freshness check: if polling or reconciliation has exceeded expected interval (120s)
+      const STALE_THRESHOLD_MS = 120000;
+      const latestActivity = Math.max(
+        lastSuccessfulApiRequestAt || 0,
+        lastSuccessfulReconciliationAt || 0,
+        lastSyncTimestamp || 0
+      );
+      const isStale = latestActivity > 0 && Date.now() - latestActivity > STALE_THRESHOLD_MS;
+      return {
+        status: isStale ? 'LIVE DATA STALE' : 'LIVE CONNECTED',
+        isDataStale: isStale,
+      };
+    }
+
+    return { status: currentConnectionStatus, isDataStale: false };
+  }
+
+  /**
    * GET /api/ewity/status
-   * Reports live connection state, permissions, and available locations.
-   * "Never show Connected unless a real authenticated API request succeeds."
+   * Reports truthful connection state, freshness, and merchant store identity.
+   * Requirement 2: Never shows LIVE CONNECTED unless a real authenticated API request succeeded.
    */
   app.get('/api/ewity/status', async (_req, res) => {
     const masked = ewityClient.getMaskedCredentials();
     const hasRequiredPerm = currentAuthorities.some((a) =>
-      a.includes('p/r-bill-history') || a.includes('p/r-bill')
+      a.includes('p/r-bill-history') || a.includes('p/r-bill') || a.includes('p/r-store')
     );
 
+    const { status: calculatedStatus, isDataStale } = getTruthfulStatus();
+    const isActuallyConnected =
+      calculatedStatus === 'LIVE CONNECTED' || calculatedStatus === 'LIVE DATA STALE';
+
     const info: EwityConnectionInfo = {
-      mode: currentConnectionStatus === 'Connected' ? 'live' : 'demo',
-      status: currentConnectionStatus,
-      isConnected: currentConnectionStatus === 'Connected',
+      mode: isDemoModeActive ? 'demo' : 'live',
+      status: calculatedStatus,
+      isConnected: isActuallyConnected,
       storeId: masked.storeId,
       hasApiKey: masked.hasApiKey,
       hasSigningSecret: ewityWebhook.hasSecret(),
@@ -175,6 +250,20 @@ async function startServer() {
       hasBillHistoryPermission: hasRequiredPerm,
       availableLocations: cachedLocations,
       lastSyncedAt: lastSyncTimestamp || undefined,
+      lastSuccessfulApiRequestAt: lastSuccessfulApiRequestAt || undefined,
+      lastSuccessfulReconciliationAt: lastSuccessfulReconciliationAt || reconciler.getStats().lastRunAt || undefined,
+      lastWebhookReceivedAt: ewityWebhook.getLastReceivedAt() || undefined,
+      lastWebhookEvent: ewityWebhook.getLastEventName() || undefined,
+      selectedMerchantStore: currentCompanyInfo
+        ? {
+            id: currentCompanyInfo.id,
+            name: currentCompanyInfo.name,
+            domain: currentCompanyInfo.domain,
+          }
+        : undefined,
+      latestSafeErrorMessage: lastErrorMessage,
+      isDataStale,
+      staleThresholdSec: 120,
       lastError: lastErrorMessage,
       reconciliationActive: reconciler.getStats().isRunning,
       lastReconciliationAt: reconciler.getStats().lastRunAt || undefined,
@@ -185,8 +274,8 @@ async function startServer() {
 
   /**
    * POST /api/ewity/connect
-   * Initiates authentication against Ewity Apps API / Platform API.
-   * Validates credentials and verifies required permissions.
+   * Authenticates against Ewity API with provided or existing environment credentials.
+   * Sets truthful status: LIVE CONNECTED, PERMISSION ERROR, or CONNECTION ERROR.
    */
   app.post('/api/ewity/connect', async (req, res) => {
     const { apiKey, storeId, baseUrl, webhookSecret } = req.body || {};
@@ -208,9 +297,8 @@ async function startServer() {
     }
 
     if (!ewityClient.hasCredentials()) {
-      currentConnectionStatus = 'Connection Error';
-      lastErrorMessage =
-        'Missing Ewity API credentials. Please provide EWITY_APP_API_KEY.';
+      currentConnectionStatus = 'NOT CONNECTED';
+      lastErrorMessage = 'Missing Ewity API credentials. Please provide EWITY_APP_API_KEY.';
       return res.status(400).json({
         success: false,
         status: currentConnectionStatus,
@@ -221,23 +309,24 @@ async function startServer() {
     currentConnectionStatus = 'Connecting';
 
     try {
-      // 1. Authenticate calling user & retrieve authorities
+      // 1. Authenticate calling user & retrieve authorities from real Ewity API
       const user = await ewityClient.getCurrentUser();
       currentCompanyInfo = user.company;
       currentAuthorities = user.authorities || [];
+      lastSuccessfulApiRequestAt = Date.now();
 
-      // 2. Fetch locations
+      // 2. Fetch authorized locations
       cachedLocations = await ewityClient.getLocations();
 
-      // 3. Permission checks (allows bill history or store administration roles)
+      // 3. Permission checks (requires bill history or store administration roles)
       const hasBillPerm = currentAuthorities.some((a) =>
         a.includes('p/r-bill-history') || a.includes('p/r-bill') || a.includes('p/r-store')
       );
 
       if (!hasBillPerm) {
-        currentConnectionStatus = 'Connection Error';
+        currentConnectionStatus = 'PERMISSION ERROR';
         lastErrorMessage =
-          'Connected, but merchant did not approve required role: "p/r-bill-history" or "p/r-store".';
+          'Connected, but merchant credentials lack required role: "p/r-bill-history" or "p/r-store".';
         return res.status(403).json({
           success: false,
           status: currentConnectionStatus,
@@ -246,7 +335,8 @@ async function startServer() {
         });
       }
 
-      currentConnectionStatus = 'Connected';
+      currentConnectionStatus = 'LIVE CONNECTED';
+      isDemoModeActive = false;
       lastErrorMessage = undefined;
       lastSyncTimestamp = Date.now();
 
@@ -261,7 +351,7 @@ async function startServer() {
         locations: cachedLocations,
       });
     } catch (err: any) {
-      currentConnectionStatus = 'Connection Error';
+      currentConnectionStatus = 'CONNECTION ERROR';
       lastErrorMessage = err.message || 'Failed to authenticate with Ewity API';
       return res.status(502).json({
         success: false,
@@ -273,36 +363,63 @@ async function startServer() {
 
   /**
    * POST /api/ewity/disconnect
-   * Reverts to Demo Mode
+   * Disconnects Ewity connection and marks status truthfully as NOT CONNECTED.
    */
   app.post('/api/ewity/disconnect', (_req, res) => {
     reconciler.stop();
-    currentConnectionStatus = 'Demo Mode';
+    currentConnectionStatus = 'NOT CONNECTED';
+    isDemoModeActive = false;
     lastErrorMessage = undefined;
-    res.json({ success: true, status: 'Demo Mode' });
+    res.json({ success: true, status: 'NOT CONNECTED', mode: 'live' });
+  });
+
+  /**
+   * POST /api/ewity/demo/enable
+   * Explicit user activation of Demo Mode.
+   */
+  app.post('/api/ewity/demo/enable', (_req, res) => {
+    isDemoModeActive = true;
+    res.json({ success: true, status: 'DEMO MODE', mode: 'demo' });
+  });
+
+  /**
+   * POST /api/ewity/demo/disable
+   * Explicit user deactivation of Demo Mode, returning to Live Mode.
+   */
+  app.post('/api/ewity/demo/disable', (_req, res) => {
+    isDemoModeActive = false;
+    const { status } = getTruthfulStatus();
+    res.json({ success: true, status, mode: 'live' });
   });
 
   /**
    * GET /api/ewity/locations
-   * Lists locations available to the app
+   * Lists genuine locations if connected, demo locations only in explicit Demo Mode, or empty if disconnected.
    */
-  app.get('/api/ewity/locations', async (_req, res) => {
-    if (currentConnectionStatus !== 'Connected') {
+  app.get('/api/ewity/locations', async (req, res) => {
+    const isDemoReq = req.query.mode === 'demo' || isDemoModeActive;
+    if (isDemoReq) {
       return res.json({
         locations: [
           { id: 1, name: 'Harbor Wharf Bistro (Store #101)', type: 'restaurant' },
           { id: 2, name: 'Ewity Downtown Flagship (Store #102)', type: 'restaurant' },
           { id: 3, name: 'The Garden Terrace (Store #103)', type: 'restaurant' },
         ],
+        mode: 'demo',
       });
+    }
+
+    const { status } = getTruthfulStatus();
+    if (status !== 'LIVE CONNECTED' && status !== 'LIVE DATA STALE') {
+      return res.json({ locations: [], mode: 'live' });
     }
 
     try {
       const locations = await ewityClient.getLocations();
       cachedLocations = locations;
-      res.json({ locations });
+      res.json({ locations, mode: 'live' });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      res.status(502).json({ error: err.message, locations: [], mode: 'live' });
     }
   });
 
@@ -310,22 +427,25 @@ async function startServer() {
    * GET /api/ewity/bills
    * Proxies bill listing with pagination, search, and KOT filtering.
    * Path: GET /sales/bills/location/{id}
+   *
+   * STRICT ZERO-FAKE-DATA RULES:
+   * 1. If not connected, returns an error and EMPTY orders. Never returns mock bills.
+   * 2. If API fails, returns 502 error. Never returns fallbackData containing mock records.
+   * 3. Mock bills are returned ONLY when Demo Mode is explicitly active.
    */
   app.get('/api/ewity/bills', async (req, res) => {
-    const {
-      location_id = 'all',
-      page = 1,
-      limit = 20,
-      order_by = 'created_at:desc',
-      q_kot_number,
-      q_number,
-      q_status,
-      q_type,
-      q_payment_status,
-    } = req.query as Record<string, string>;
+    const isDemoReq = req.query.mode === 'demo' || isDemoModeActive;
 
-    // If in Demo Mode, return mock bills
-    if (currentConnectionStatus !== 'Connected') {
+    // 1. Explicit Demo Mode: return mock bills tagged as simulated fixtures
+    if (isDemoReq) {
+      const {
+        page = 1,
+        limit = 20,
+        q_kot_number,
+        q_number,
+        q_status,
+      } = req.query as Record<string, string>;
+
       let filtered = [...MOCK_EWITY_BILLS];
       if (q_kot_number) {
         filtered = filtered.filter((b) =>
@@ -341,7 +461,9 @@ async function startServer() {
         );
       }
 
-      const mappedOrders = filtered.map((b) => mapEwityBillToOrder(b));
+      const mappedOrders = filtered.map((b) =>
+        mapEwityBillToOrder(b, undefined, undefined, 'simulated_fixture')
+      );
       return res.json({
         data: filtered,
         mappedOrders,
@@ -352,11 +474,48 @@ async function startServer() {
           hasMorePages: false,
         },
         mode: 'demo',
+        isDemo: true,
       });
     }
 
+    // 2. Live Mode Check:
+    // If Ewity is not authenticated, return an explicit error with EMPTY data.
+    const { status: connStatus } = getTruthfulStatus();
+    if (connStatus !== 'LIVE CONNECTED' && connStatus !== 'LIVE DATA STALE') {
+      return res.status(400).json({
+        error: 'not_connected',
+        status: connStatus,
+        message: lastErrorMessage || 'Ewity POS is not connected. Configure credentials to fetch live bills.',
+        data: [],
+        mappedOrders: [],
+        mode: 'live',
+        isDemo: false,
+      });
+    }
+
+    const {
+      location_id = 'all',
+      page = 1,
+      limit = 20,
+      order_by = 'created_at:desc',
+      q_kot_number,
+      q_number,
+      q_status,
+      q_type,
+      q_payment_status,
+    } = req.query as Record<string, string>;
+
+    // Sanitize location id
+    let effectiveLocationId = location_id;
+    if (cachedLocations.length > 0) {
+      const isKnown = cachedLocations.some((l) => String(l.id) === location_id);
+      if (!isKnown && location_id !== 'all') {
+        effectiveLocationId = String(cachedLocations[0].id);
+      }
+    }
+
     try {
-      const billResponse = await ewityClient.listBills(location_id, {
+      const billResponse = await ewityClient.listBills(effectiveLocationId, {
         page: Number(page),
         limit: Number(limit),
         order_by,
@@ -367,50 +526,88 @@ async function startServer() {
         q_payment_status,
       });
 
-      // Map real bills into internal Order model
-      let mappedOrders = billResponse.data.map((bill) => {
-        const existing = liveOrdersCache.find((o) => o.id === `ewity-${bill.id}`);
-        return mapEwityBillToOrder(bill, undefined, existing);
-      });
+      lastSuccessfulApiRequestAt = Date.now();
 
-      // If merchant store has no bills yet, maintain active sandbox orders for monitoring
-      if (mappedOrders.length === 0 && liveOrdersCache.length > 0) {
-        mappedOrders = liveOrdersCache;
+      // If store app access is pending merchant installation in Ewity App Store:
+      if (billResponse.appAccessPending) {
+        return res.status(403).json({
+          error: 'app_authorization_pending',
+          status: 'PERMISSION ERROR',
+          message: 'This store has not authorized app access. The merchant must install the app in the Ewity App Store.',
+          data: [],
+          mappedOrders: [],
+          mode: 'live',
+          isDemo: false,
+          appAccessPending: true,
+        });
       }
 
-      res.json({
+      // Map real bills into internal Order model with 'ewity_api' data source
+      const mappedOrders = billResponse.data.map((bill) => {
+        const existing = liveOrdersCache.find((o) => o.id === `ewity-${bill.id}`);
+        return mapEwityBillToOrder(bill, undefined, existing, 'ewity_api');
+      });
+
+      // Update genuine cache
+      liveBillsCache = billResponse.data;
+      liveOrdersCache = mappedOrders;
+      lastSyncTimestamp = Date.now();
+      persistState(liveBillsCache, liveOrdersCache);
+
+      return res.json({
         ...billResponse,
         mappedOrders,
         mode: 'live',
+        isDemo: false,
+        appAccessPending: false,
       });
     } catch (err: any) {
-      res.status(502).json({
-        error: err.message,
-        fallbackData: MOCK_EWITY_BILLS,
+      lastErrorMessage = err.message || 'Failed to fetch bills from Ewity API';
+      // Return clear error. NEVER return fallbackData containing mock bills!
+      return res.status(502).json({
+        error: lastErrorMessage,
+        status: 'CONNECTION ERROR',
+        message: lastErrorMessage,
+        data: [],
+        mappedOrders: [],
+        mode: 'live',
+        isDemo: false,
       });
     }
   });
 
   /**
    * GET /api/ewity/bills/:id
-   * Retrieves single bill detail including line items and payments
+   * Retrieves single bill detail including line items and payments.
+   * Returns mock bill ONLY in Demo Mode. Never returns mock bill in Live Mode.
    */
   app.get('/api/ewity/bills/:id', async (req, res) => {
     const { id } = req.params;
+    const isDemoReq = req.query.mode === 'demo' || isDemoModeActive;
 
-    if (currentConnectionStatus !== 'Connected') {
+    if (isDemoReq) {
       const found = MOCK_EWITY_BILLS.find((b) => String(b.id) === id);
       if (found) {
-        return res.json({ data: found });
+        return res.json({ data: found, mode: 'demo', isDemo: true });
       }
-      return res.status(404).json({ error: 'Bill not found' });
+      return res.status(404).json({ error: 'Bill not found in demo data' });
+    }
+
+    const { status: connStatus } = getTruthfulStatus();
+    if (connStatus !== 'LIVE CONNECTED' && connStatus !== 'LIVE DATA STALE') {
+      return res.status(400).json({
+        error: 'not_connected',
+        status: connStatus,
+        message: 'Ewity POS is not connected.',
+      });
     }
 
     try {
       const detail = await ewityClient.getBillDetail(id);
-      res.json({ data: detail });
+      lastSuccessfulApiRequestAt = Date.now();
+      res.json({ data: detail, mode: 'live', isDemo: false });
     } catch (err: any) {
-      res.status(502).json({ error: err.message });
+      res.status(502).json({ error: err.message, mode: 'live', isDemo: false });
     }
   });
 
@@ -559,7 +756,7 @@ async function startServer() {
       if (result.success && envelope.data) {
         if (envelope.event === 'bill.created' && envelope.data.bill) {
           const bill = envelope.data.bill;
-          const mappedOrder = mapEwityBillToOrder(bill);
+          const mappedOrder = mapEwityBillToOrder(bill, undefined, undefined, 'ewity_webhook');
           const existingIdx = liveOrdersCache.findIndex((o) => o.id === mappedOrder.id);
           if (existingIdx >= 0) {
             liveOrdersCache[existingIdx] = mappedOrder;
@@ -571,7 +768,7 @@ async function startServer() {
           const billId = `ewity-${envelope.data.bill_id}`;
           liveOrdersCache = liveOrdersCache.map((ord) => {
             if (ord.id === billId) {
-              return { ...ord, orderStatus: 'Voided' };
+              return { ...ord, orderStatus: 'Voided', dataSource: 'ewity_webhook' as const };
             }
             return ord;
           });
@@ -613,12 +810,16 @@ async function startServer() {
    */
   app.post('/api/ewity/reconcile', async (_req, res) => {
     const result = await reconciler.reconcile();
+    if (result.success && result.billsCount >= 0) {
+      lastSuccessfulReconciliationAt = Date.now();
+      lastSuccessfulApiRequestAt = Date.now();
+    }
     res.json(result);
   });
 
   /**
    * POST /api/ewity/tests/run
-   * Runs the complete 9-part mock API test suite
+   * Runs the complete mock API test suite
    */
   app.post('/api/ewity/tests/run', async (_req, res) => {
     const results = await runEwityMockTestSuite();
@@ -663,16 +864,32 @@ async function startServer() {
       currentCompanyInfo = user.company;
       currentAuthorities = user.authorities || [];
       cachedLocations = await ewityClient.getLocations();
-      currentConnectionStatus = 'Connected';
-      lastErrorMessage = undefined;
-      lastSyncTimestamp = Date.now();
-      reconciler.start();
-      console.log(`[EWITY-WATCHDOG] ✓ Successfully connected to Ewity POS (${user.company?.name || user.name}) with ${cachedLocations.length} location(s).`);
+      lastSuccessfulApiRequestAt = Date.now();
+
+      const hasBillPerm = currentAuthorities.some((a) =>
+        a.includes('p/r-bill-history') || a.includes('p/r-bill') || a.includes('p/r-store')
+      );
+
+      if (!hasBillPerm) {
+        currentConnectionStatus = 'PERMISSION ERROR';
+        lastErrorMessage =
+          'Connected to store, but required role "p/r-bill-history" is not approved.';
+        console.warn(`[EWITY-WATCHDOG] ⚠ ${lastErrorMessage}`);
+      } else {
+        currentConnectionStatus = 'LIVE CONNECTED';
+        lastErrorMessage = undefined;
+        lastSyncTimestamp = Date.now();
+        reconciler.start();
+        console.log(`[EWITY-WATCHDOG] ✓ Successfully connected to Ewity POS (${user.company?.name || user.name}) with ${cachedLocations.length} location(s).`);
+      }
     } catch (err: any) {
       console.warn('[EWITY-WATCHDOG] Initial connection verification notice:', err.message);
-      currentConnectionStatus = 'Demo Mode';
-      lastErrorMessage = undefined;
+      currentConnectionStatus = 'CONNECTION ERROR';
+      lastErrorMessage = err.message || 'Failed to authenticate with Ewity API';
     }
+  } else {
+    currentConnectionStatus = 'NOT CONNECTED';
+    lastErrorMessage = 'No Ewity credentials configured.';
   }
 
   app.listen(PORT, '0.0.0.0', () => {

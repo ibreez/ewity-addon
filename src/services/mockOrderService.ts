@@ -54,7 +54,8 @@ export const DEFAULT_MONITORING_SETTINGS: MonitoringSettings = {
   simulationIntervalSec: 45,
 };
 
-const STORAGE_ORDERS_KEY = 'ewity_watchdog_orders_v1';
+const STORAGE_LIVE_ORDERS_KEY = 'ewity_watchdog_live_orders_v1';
+const STORAGE_DEMO_ORDERS_KEY = 'ewity_watchdog_demo_orders_v1';
 const STORAGE_SETTINGS_KEY = 'ewity_watchdog_settings_v1';
 
 export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
@@ -82,6 +83,8 @@ export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
       locationId: 'loc-main',
       alertSeverity: 'warning',
       activeAlertIds: [],
+      dataSource: 'simulated_fixture',
+      dataTimestamp: baseTime,
     },
     {
       id: 'ord-4098',
@@ -107,6 +110,8 @@ export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
       locationId: 'loc-main',
       alertSeverity: 'urgent',
       activeAlertIds: [],
+      dataSource: 'simulated_fixture',
+      dataTimestamp: baseTime,
     },
     {
       id: 'ord-4095',
@@ -132,6 +137,8 @@ export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
       locationId: 'loc-main',
       alertSeverity: 'warning',
       activeAlertIds: [],
+      dataSource: 'simulated_fixture',
+      dataTimestamp: baseTime,
     },
     {
       id: 'ord-4105',
@@ -155,6 +162,8 @@ export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
       locationId: 'loc-main',
       alertSeverity: 'nominal',
       activeAlertIds: [],
+      dataSource: 'simulated_fixture',
+      dataTimestamp: baseTime,
     },
     {
       id: 'ord-4092',
@@ -179,6 +188,8 @@ export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
       locationId: 'loc-main',
       alertSeverity: 'nominal',
       activeAlertIds: [],
+      dataSource: 'simulated_fixture',
+      dataTimestamp: baseTime,
     },
     {
       id: 'ord-4087',
@@ -203,30 +214,74 @@ export function getInitialMockOrders(baseTime: number = Date.now()): Order[] {
       locationId: 'loc-main',
       alertSeverity: 'nominal',
       activeAlertIds: [],
+      dataSource: 'simulated_fixture',
+      dataTimestamp: baseTime,
     },
   ];
 }
 
-export function loadSavedOrders(): Order[] {
+/**
+ * Loads saved live orders from localStorage.
+ * STRICT RULE: Never returns mock orders if no live orders exist!
+ * Returns empty array so the live dashboard displays authentic state.
+ */
+export function loadSavedLiveOrders(): Order[] {
   try {
-    const raw = localStorage.getItem(STORAGE_ORDERS_KEY);
+    const raw = localStorage.getItem(STORAGE_LIVE_ORDERS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      // Exclude any accidental simulated orders from live storage
+      return parsed.filter((o) => o && o.dataSource !== 'simulated_fixture');
+    }
+  } catch {
+    // ignore parse error
+  }
+  return [];
+}
+
+export function saveLiveOrders(orders: Order[]): void {
+  try {
+    // Only persist genuine live/webhook/persisted orders
+    const genuine = orders.filter((o) => o.dataSource !== 'simulated_fixture');
+    localStorage.setItem(STORAGE_LIVE_ORDERS_KEY, JSON.stringify(genuine));
+  } catch {
+    // localStorage full or restricted
+  }
+}
+
+/**
+ * Loads orders for explicitly activated Demo Mode only.
+ */
+export function loadDemoOrders(): Order[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_DEMO_ORDERS_KEY);
     if (!raw) return getInitialMockOrders();
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed) && parsed.length > 0) {
       return parsed;
     }
   } catch {
-    // ignore parse error and fallback
+    // ignore parse error
   }
   return getInitialMockOrders();
 }
 
-export function saveOrders(orders: Order[]): void {
+export function saveDemoOrders(orders: Order[]): void {
   try {
-    localStorage.setItem(STORAGE_ORDERS_KEY, JSON.stringify(orders));
+    localStorage.setItem(STORAGE_DEMO_ORDERS_KEY, JSON.stringify(orders));
   } catch {
     // localStorage full or restricted
   }
+}
+
+// Default export wrapper for backward compatibility - returns genuine live orders ONLY
+export function loadSavedOrders(): Order[] {
+  return loadSavedLiveOrders();
+}
+
+export function saveOrders(orders: Order[]): void {
+  saveLiveOrders(orders);
 }
 
 export function loadSavedSettings(): MonitoringSettings {
@@ -355,5 +410,7 @@ export function generateSimulatedOrder(
     locationId,
     alertSeverity: 'nominal',
     activeAlertIds: [],
+    dataSource: 'simulated_fixture',
+    dataTimestamp: now,
   };
 }

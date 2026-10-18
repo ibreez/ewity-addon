@@ -77,25 +77,33 @@ export const Header: React.FC<HeaderProps> = ({
                 type="button"
                 onClick={onOpenEwityIntegration}
                 className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold border cursor-pointer transition-colors ${
-                  ewityStatus === 'Connected'
+                  ewityStatus === 'LIVE CONNECTED'
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                    : ewityStatus === 'DEMO MODE'
+                    ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
                     : ewityStatus === 'Connecting'
                     ? 'bg-blue-50 text-blue-800 border-blue-300 hover:bg-blue-100'
-                    : ewityStatus === 'Connection Error'
+                    : ewityStatus === 'LIVE DATA STALE'
+                    ? 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
+                    : ewityStatus === 'PERMISSION ERROR' || ewityStatus === 'CONNECTION ERROR'
                     ? 'bg-red-50 text-red-800 border-red-300 hover:bg-red-100'
-                    : 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
+                    : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
                 }`}
-                title="Click to view Ewity Apps API Integration & Tests"
+                title="Click to view Ewity Apps API Integration & Credentials"
               >
                 <span
                   className={`w-1.5 h-1.5 rounded-full ${
-                    ewityStatus === 'Connected'
+                    ewityStatus === 'LIVE CONNECTED'
                       ? 'bg-emerald-600'
+                      : ewityStatus === 'DEMO MODE'
+                      ? 'bg-amber-500'
                       : ewityStatus === 'Connecting'
                       ? 'bg-blue-600'
-                      : ewityStatus === 'Connection Error'
+                      : ewityStatus === 'LIVE DATA STALE'
+                      ? 'bg-amber-600'
+                      : ewityStatus === 'PERMISSION ERROR' || ewityStatus === 'CONNECTION ERROR'
                       ? 'bg-red-600'
-                      : 'bg-amber-600'
+                      : 'bg-slate-400'
                   }`}
                 />
                 <span>{ewityStatus}</span>
@@ -147,22 +155,29 @@ export const Header: React.FC<HeaderProps> = ({
         {/* Connection status indicator with toggle */}
         <button
           onClick={onToggleConnection}
-          title="Click to simulate POS connection drop/restore"
+          title="Click to toggle POS connection state"
           className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors ${
-            connectionStatus === 'demo_connected'
+            connectionStatus === 'LIVE CONNECTED'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
+              : connectionStatus === 'DEMO MODE'
+              ? 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
               : 'bg-red-50 border-red-300 text-red-800 hover:bg-red-100'
           }`}
         >
-          {connectionStatus === 'demo_connected' ? (
+          {connectionStatus === 'LIVE CONNECTED' ? (
             <>
               <Wifi className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Gateway OK</span>
+              <span>Live POS OK</span>
+            </>
+          ) : connectionStatus === 'DEMO MODE' ? (
+            <>
+              <Wifi className="w-3.5 h-3.5 text-amber-600" />
+              <span>Demo Mode</span>
             </>
           ) : (
             <>
               <WifiOff className="w-3.5 h-3.5 text-red-600" />
-              <span>Offline (Simulated)</span>
+              <span>{connectionStatus}</span>
             </>
           )}
         </button>

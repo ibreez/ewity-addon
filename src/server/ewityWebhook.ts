@@ -30,6 +30,8 @@ export class EwityWebhookService {
   private processedDeliveries = new Map<string, ProcessedWebhookRecord>();
   private entityTimestamps = new Map<string, number>();
   private recentEvents: (EwityWebhookEnvelope & { deliveryId: string; verified: boolean; status: string })[] = [];
+  private lastWebhookReceivedAt: number | null = null;
+  private lastWebhookEvent: string | null = null;
 
   constructor(signingSecret: string = '') {
     this.signingSecret = signingSecret;
@@ -225,6 +227,9 @@ export class EwityWebhookService {
       this.recentEvents.pop();
     }
 
+    this.lastWebhookReceivedAt = now;
+    this.lastWebhookEvent = envelope.event;
+
     console.log(`[EWITY-WEBHOOK] Processed event ${envelope.event} (delivery: ${effectiveDeliveryId}) for install ${envelope.install?.store_id}`);
 
     return {
@@ -234,6 +239,14 @@ export class EwityWebhookService {
       action: 'processed',
       message: `Event ${envelope.event} processed successfully.`,
     };
+  }
+
+  public getLastReceivedAt(): number | null {
+    return this.lastWebhookReceivedAt;
+  }
+
+  public getLastEventName(): string | null {
+    return this.lastWebhookEvent;
   }
 
   public getRecentEvents() {

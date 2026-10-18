@@ -258,11 +258,33 @@ export const OrderTable: React.FC<OrderTableProps> = ({
                       </div>
                     </td>
 
-                    {/* Source */}
-                    <td className="py-3 px-3 text-slate-600">
-                      <span className="font-medium text-slate-800">
-                        {order.source}
-                      </span>
+                    {/* Source & Provenance */}
+                    <td className="py-3 px-3 text-slate-600 whitespace-nowrap">
+                      <div className="flex flex-col gap-0.5 items-start">
+                        <span className="font-medium text-slate-800">
+                          {order.source}
+                        </span>
+                        {order.dataSource === 'ewity_api' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                            Ewity API
+                          </span>
+                        )}
+                        {order.dataSource === 'ewity_webhook' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-purple-50 text-purple-800 border border-purple-200">
+                            Webhook
+                          </span>
+                        )}
+                        {order.dataSource === 'persisted' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                            Persisted
+                          </span>
+                        )}
+                        {order.dataSource === 'simulated_fixture' && (
+                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                            Demo Fixture
+                          </span>
+                        )}
+                      </div>
                     </td>
 
                     {/* Order Type */}

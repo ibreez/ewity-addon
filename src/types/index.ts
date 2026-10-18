@@ -37,6 +37,8 @@ export interface OrderItem {
   category: 'Mains' | 'Starters' | 'Beverages' | 'Desserts';
 }
 
+export type OrderDataSource = 'ewity_api' | 'ewity_webhook' | 'persisted' | 'simulated_fixture';
+
 export interface Order {
   id: string;
   orderNumber: string;
@@ -57,6 +59,8 @@ export interface Order {
   locationId: string;
   alertSeverity: AlertSeverity;
   activeAlertIds: string[];
+  dataSource?: OrderDataSource;
+  dataTimestamp?: number;
 }
 
 export interface Alert {
@@ -97,7 +101,14 @@ export interface MonitoringSettings {
   simulationIntervalSec: number;     // default: 45
 }
 
-export type ConnectionStatus = 'demo_connected' | 'demo_interrupted';
+export type ConnectionStatus =
+  | 'LIVE CONNECTED'
+  | 'DEMO MODE'
+  | 'NOT CONNECTED'
+  | 'CONNECTION ERROR'
+  | 'LIVE DATA STALE'
+  | 'PERMISSION ERROR'
+  | 'Connecting';
 
 export interface StaffMember {
   id: string;

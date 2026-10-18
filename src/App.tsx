@@ -18,7 +18,11 @@ import {
   RESTAURANT_LOCATIONS,
   STAFF_MEMBERS,
   loadSavedOrders,
+  loadSavedLiveOrders,
+  loadDemoOrders,
   saveOrders,
+  saveLiveOrders,
+  saveDemoOrders,
   loadSavedSettings,
   saveSettings,
   getInitialMockOrders,
@@ -37,25 +41,27 @@ import { SettingsModal } from './components/SettingsModal';
 import { SimulateOrderModal } from './components/SimulateOrderModal';
 import { ThresholdRulesView } from './components/ThresholdRulesView';
 import { EwityIntegrationView } from './components/EwityIntegrationView';
+import { ConnectionStatusPanel } from './components/ConnectionStatusPanel';
+import { DemoDataBanner } from './components/DemoDataBanner';
 import { ToastContainer } from './components/ToastContainer';
 import { playAlertSound } from './utils/audio';
 import { EwityConnectionInfo } from './types/ewity';
 
 export default function App() {
-  // 1. Core State
-  const [orders, setOrders] = useState<Order[]>(() => loadSavedOrders());
+  // 1. Core State - strictly starts with saved genuine live orders
+  const [orders, setOrders] = useState<Order[]>(() => loadSavedLiveOrders());
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [settings, setSettings] = useState<MonitoringSettings>(() => loadSavedSettings());
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('demo_connected');
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('NOT CONNECTED');
   const [currentLocationId, setCurrentLocationId] = useState<string>('loc-main');
   const [currentStaffId, setCurrentStaffId] = useState<string>('staff-1');
   const [currentTime, setCurrentTime] = useState<number>(Date.now());
   const [currentView, setCurrentView] = useState<DashboardView>('active_orders');
 
-  // Ewity Apps API Integration State (Phase 2)
+  // Ewity Apps API Integration State
   const [ewityInfo, setEwityInfo] = useState<EwityConnectionInfo>({
-    mode: 'demo',
-    status: 'Demo Mode',
+    mode: 'live',
+    status: 'NOT CONNECTED',
     isConnected: false,
     storeId: null,
     hasApiKey: false,
@@ -132,6 +138,17 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setEwityInfo(data);
+        if (data.status) {
+          setConnectionStatus(data.status);
+        }
+        if (data.availableLocations && data.availableLocations.length > 0) {
+          setCurrentLocationId((prev) => {
+            if (prev === 'loc-main' || !data.availableLocations.some((l: any) => String(l.id) === prev)) {
+              return String(data.availableLocations[0].id);
+            }
+            return prev;
+          });
+        }
       }
     } catch {
       // Backend starting up or running client-only
@@ -144,24 +161,17 @@ export default function App() {
     return () => clearInterval(interval);
   }, [fetchEwityStatus]);
 
-  // Sync real bills when Ewity is Connected
+  // Sync real bills when Ewity is LIVE CONNECTED or LIVE DATA STALE
   const syncEwityBills = useCallback(async () => {
-    if (ewityInfo.status !== 'Connected') return;
+    if (ewityInfo.status !== 'LIVE CONNECTED' && ewityInfo.status !== 'LIVE DATA STALE') return;
     try {
       const res = await fetch(`/api/ewity/bills?location_id=${currentLocationId}`);
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data.mappedOrders) && data.mappedOrders.length > 0) {
-          setOrders((prev) => {
-            const merged = [...data.mappedOrders];
-            // Keep any locally created mock orders that aren't in Ewity
-            prev.forEach((p) => {
-              if (!merged.some((m) => m.id === p.id)) {
-                merged.push(p);
-              }
-            });
-            return merged;
-          });
+        if (Array.isArray(data.mappedOrders)) {
+          // STRICT RULE: If in Live Mode, visible orders must only be genuine live orders!
+          setOrders(data.mappedOrders);
+          saveLiveOrders(data.mappedOrders);
         }
       }
     } catch {
@@ -170,7 +180,7 @@ export default function App() {
   }, [ewityInfo.status, currentLocationId]);
 
   useEffect(() => {
-    if (ewityInfo.status === 'Connected') {
+    if (ewityInfo.status === 'LIVE CONNECTED' || ewityInfo.status === 'LIVE DATA STALE') {
       syncEwityBills();
       const billTimer = setInterval(syncEwityBills, 15000);
       return () => clearInterval(billTimer);
@@ -444,19 +454,33 @@ export default function App() {
   );
 
   const handleResetData = useCallback(() => {
-    const initial = getInitialMockOrders();
-    setOrders(initial);
-    saveOrders(initial);
-    setAlerts([]);
-    AlertManager.resetNotificationCache();
-    addToast({
-      id: `toast-reset-${Date.now()}`,
-      title: 'Demo Data Reset',
-      message: 'Restored initial sample restaurant orders and cleared alert history.',
-      severity: 'info',
-      timestamp: Date.now(),
-    });
-  }, [addToast]);
+    if (ewityInfo.mode === 'demo') {
+      const initial = getInitialMockOrders();
+      setOrders(initial);
+      saveDemoOrders(initial);
+      setAlerts([]);
+      AlertManager.resetNotificationCache();
+      addToast({
+        id: `toast-reset-${Date.now()}`,
+        title: 'Demo Data Reset',
+        message: 'Restored initial sample restaurant orders and cleared alert history.',
+        severity: 'info',
+        timestamp: Date.now(),
+      });
+    } else {
+      setAlerts([]);
+      AlertManager.resetNotificationCache();
+      const liveOrders = loadSavedLiveOrders();
+      setOrders(liveOrders);
+      addToast({
+        id: `toast-reset-${Date.now()}`,
+        title: 'Alert History Reset',
+        message: 'Cleared active alert notifications. Preserved authentic live orders.',
+        severity: 'info',
+        timestamp: Date.now(),
+      });
+    }
+  }, [ewityInfo.mode, addToast]);
 
   const handleSaveSettings = useCallback(
     (updatedSettings: MonitoringSettings) => {
@@ -493,20 +517,61 @@ export default function App() {
   const handleToggleConnection = useCallback(() => {
     setConnectionStatus((prev) => {
       const next: ConnectionStatus =
-        prev === 'demo_connected' ? 'demo_interrupted' : 'demo_connected';
+        prev === 'CONNECTION ERROR' ? 'LIVE CONNECTED' : 'CONNECTION ERROR';
       addToast({
         id: `toast-conn-${Date.now()}`,
-        title: next === 'demo_connected' ? 'POS Gateway Reconnected' : 'POS Gateway Interrupted',
+        title: next === 'LIVE CONNECTED' ? 'POS Gateway Reconnected' : 'POS Gateway Interrupted',
         message:
-          next === 'demo_connected'
+          next === 'LIVE CONNECTED'
             ? 'Heartbeat restored with terminal database'
             : 'Simulated network drop triggered (Urgent Alert)',
-        severity: next === 'demo_connected' ? 'info' : 'urgent',
+        severity: next === 'LIVE CONNECTED' ? 'info' : 'urgent',
         timestamp: Date.now(),
       });
       return next;
     });
   }, [addToast]);
+
+  const handleEnableDemoMode = async () => {
+    try {
+      await fetch('/api/ewity/demo/enable', { method: 'POST' });
+      await fetchEwityStatus();
+      setConnectionStatus('DEMO MODE');
+      const demoOrders = loadDemoOrders();
+      setOrders(demoOrders);
+      addToast({
+        id: `toast-demo-enable-${Date.now()}`,
+        title: 'Demo Mode Activated',
+        message: 'Loaded simulated restaurant fixtures. Real orders unaffected.',
+        severity: 'info',
+        timestamp: Date.now(),
+      });
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleDisableDemoMode = async () => {
+    try {
+      await fetch('/api/ewity/demo/disable', { method: 'POST' });
+      await fetchEwityStatus();
+      // STRICT REQUIREMENT: Switching to Live Mode must clear demo records from visible dashboard
+      const liveOrders = loadSavedLiveOrders();
+      setOrders(liveOrders);
+      if (ewityInfo.status === 'LIVE CONNECTED' || ewityInfo.status === 'LIVE DATA STALE') {
+        syncEwityBills();
+      }
+      addToast({
+        id: `toast-demo-disable-${Date.now()}`,
+        title: 'Live Mode Active',
+        message: 'Demo fixtures cleared. Displaying authentic live restaurant data.',
+        severity: 'info',
+        timestamp: Date.now(),
+      });
+    } catch {
+      // ignore
+    }
+  };
 
   // Phase 2 Ewity Connect / Disconnect / Reconcile Handlers
   const handleConnectEwity = async (credentials: { apiKey?: string; storeId?: string; webhookSecret?: string }) => {
@@ -532,10 +597,11 @@ export default function App() {
   const handleDisconnectEwity = async () => {
     await fetch('/api/ewity/disconnect', { method: 'POST' });
     await fetchEwityStatus();
+    setOrders(loadSavedLiveOrders());
     addToast({
       id: `toast-ewity-disconn-${Date.now()}`,
-      title: 'Switched to Demo Mode',
-      message: 'Ewity live adapter disconnected. Returned to demo sandbox.',
+      title: 'Ewity Gateway Disconnected',
+      message: 'Status set to NOT CONNECTED. Live polling stopped.',
       severity: 'info',
       timestamp: Date.now(),
     });
@@ -642,6 +708,23 @@ export default function App() {
               </button>
             </div>
           </div>
+
+          {/* Prominent DEMO DATA banner on every relevant screen when Demo Mode is active */}
+          {ewityInfo.mode === 'demo' && (
+            <DemoDataBanner
+              onSwitchToLive={handleDisableDemoMode}
+              onResetDemoData={handleResetData}
+            />
+          )}
+
+          {/* Truthful Connection Status & Diagnostics Panel */}
+          <ConnectionStatusPanel
+            info={ewityInfo}
+            onOpenIntegration={() => setCurrentView('ewity_integration')}
+            onEnableDemoMode={handleEnableDemoMode}
+            onDisableDemoMode={handleDisableDemoMode}
+            onRefresh={fetchEwityStatus}
+          />
 
           {/* Summary KPI Cards Strip */}
           <SummaryCards

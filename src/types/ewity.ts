@@ -119,10 +119,13 @@ export interface EwityWebhookEnvelope<T = any> {
 }
 
 export type EwityConnectionStatus = 
-  | 'Demo Mode'
-  | 'Connecting'
-  | 'Connected'
-  | 'Connection Error';
+  | 'LIVE CONNECTED'
+  | 'DEMO MODE'
+  | 'NOT CONNECTED'
+  | 'CONNECTION ERROR'
+  | 'LIVE DATA STALE'
+  | 'PERMISSION ERROR'
+  | 'Connecting';
 
 export interface EwityConnectionInfo {
   mode: 'demo' | 'live';
@@ -137,6 +140,19 @@ export interface EwityConnectionInfo {
   availableLocations: EwityLocation[];
   activeLocationId?: string;
   lastSyncedAt?: number;
+  lastSuccessfulApiRequestAt?: number;
+  lastSuccessfulReconciliationAt?: number;
+  lastWebhookReceivedAt?: number;
+  lastWebhookEvent?: string;
+  selectedMerchantStore?: {
+    id: string | number;
+    name: string;
+    domain?: string;
+  };
+  latestSafeErrorMessage?: string;
+  lastErrorMessage?: string;
+  isDataStale?: boolean;
+  staleThresholdSec?: number;
   lastError?: string;
   reconciliationActive: boolean;
   lastReconciliationAt?: number;
@@ -156,6 +172,7 @@ export interface EwityBillListResponse {
   data: EwityBillSummary[];
   pagination: EwityPagination;
   search?: Record<string, any>;
+  appAccessPending?: boolean;
 }
 
 export interface MockTestResult {
