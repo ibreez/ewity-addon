@@ -140,6 +140,9 @@ export interface EwityConnectionInfo {
   lastError?: string;
   reconciliationActive: boolean;
   lastReconciliationAt?: number;
+  hasAppUiSecret?: boolean;
+  appUiEndpoint?: string;
+  appUiUrl?: string;
 }
 
 export interface EwityPagination {
@@ -159,7 +162,7 @@ export interface MockTestResult {
   id: string;
   name: string;
   description: string;
-  category: 'authentication' | 'bills' | 'pagination' | 'rate_limit' | 'webhooks' | 'network';
+  category: 'authentication' | 'bills' | 'pagination' | 'rate_limit' | 'webhooks' | 'network' | 'app_ui';
   passed: boolean;
   statusCode?: number;
   durationMs: number;
