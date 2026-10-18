@@ -104,10 +104,13 @@ export interface MonitoringSettings {
 export type ConnectionStatus =
   | 'LIVE CONNECTED'
   | 'DEMO MODE'
+  | 'NOT CONFIGURED'
   | 'NOT CONNECTED'
+  | 'AUTHENTICATION FAILED'
+  | 'AWAITING MERCHANT APPROVAL'
+  | 'PERMISSION ERROR'
   | 'CONNECTION ERROR'
   | 'LIVE DATA STALE'
-  | 'PERMISSION ERROR'
   | 'Connecting';
 
 export interface StaffMember {

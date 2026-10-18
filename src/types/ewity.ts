@@ -121,11 +121,28 @@ export interface EwityWebhookEnvelope<T = any> {
 export type EwityConnectionStatus = 
   | 'LIVE CONNECTED'
   | 'DEMO MODE'
+  | 'NOT CONFIGURED'
   | 'NOT CONNECTED'
+  | 'AUTHENTICATION FAILED'
+  | 'AWAITING MERCHANT APPROVAL'
+  | 'PERMISSION ERROR'
   | 'CONNECTION ERROR'
   | 'LIVE DATA STALE'
-  | 'PERMISSION ERROR'
   | 'Connecting';
+
+export interface TestConnectionResult {
+  outcome: EwityConnectionStatus;
+  success: boolean;
+  message: string;
+  testedAt: number;
+  httpStatus?: number;
+  endpoint: string;
+  isPlatformKeyWarning?: boolean;
+  storeId?: string;
+  companyName?: string;
+  locationsCount?: number;
+  configSource?: 'environment' | 'custom_runtime';
+}
 
 export interface EwityConnectionInfo {
   mode: 'demo' | 'live';
@@ -133,6 +150,10 @@ export interface EwityConnectionInfo {
   isConnected: boolean;
   storeId: string | null;
   hasApiKey: boolean;
+  hasStoreId?: boolean;
+  apiKeyMasked?: string;
+  isPlatformKeyWarning?: boolean;
+  configSource?: 'environment' | 'custom_runtime';
   hasSigningSecret: boolean;
   company?: EwityCompany;
   authorities: string[];
@@ -159,6 +180,8 @@ export interface EwityConnectionInfo {
   hasAppUiSecret?: boolean;
   appUiEndpoint?: string;
   appUiUrl?: string;
+  lastTestedAt?: number | null;
+  testOutcome?: TestConnectionResult | null;
 }
 
 export interface EwityPagination {

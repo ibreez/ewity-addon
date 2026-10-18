@@ -54,13 +54,37 @@ export const ConnectionStatusPanel: React.FC<ConnectionStatusPanelProps> = ({
           dot: 'bg-amber-500',
           description: 'Displaying simulated test fixtures. No live restaurant orders affected.',
         };
+      case 'NOT CONFIGURED':
+        return {
+          label: 'NOT CONFIGURED',
+          icon: XCircle,
+          bg: 'bg-slate-500/10 border-slate-300 text-slate-700',
+          dot: 'bg-slate-400',
+          description: 'API key or store ID is missing. Configure EWITY_APP_API_KEY and EWITY_STORE_ID.',
+        };
+      case 'AUTHENTICATION FAILED':
+        return {
+          label: 'AUTHENTICATION FAILED',
+          icon: XCircle,
+          bg: 'bg-red-500/10 border-red-500/30 text-red-800',
+          dot: 'bg-red-600',
+          description: 'Ewity Apps API rejected credentials. Invalid or expired API key.',
+        };
+      case 'AWAITING MERCHANT APPROVAL':
+        return {
+          label: 'AWAITING MERCHANT APPROVAL',
+          icon: AlertTriangle,
+          bg: 'bg-blue-500/10 border-blue-500/30 text-blue-900',
+          dot: 'bg-blue-600 animate-pulse',
+          description: 'Store app installation pending. The restaurant business must install and approve the app in Ewity App Store.',
+        };
       case 'NOT CONNECTED':
         return {
           label: 'NOT CONNECTED',
           icon: XCircle,
           bg: 'bg-slate-500/10 border-slate-300 text-slate-700',
           dot: 'bg-slate-400',
-          description: 'Credentials not configured. Live orders and webhook updates suspended.',
+          description: 'Credentials not configured or connection disconnected.',
         };
       case 'CONNECTION ERROR':
         return {
@@ -141,6 +165,11 @@ export const ConnectionStatusPanel: React.FC<ConnectionStatusPanelProps> = ({
                 Reason: {info.latestSafeErrorMessage || info.lastErrorMessage || info.lastError}
               </p>
             )}
+            {info.isPlatformKeyWarning && (
+              <p className="text-xs text-amber-800 font-medium mt-1 bg-amber-50 px-2 py-1 rounded border border-amber-300 inline-block">
+                ⚠️ Token Notice: Key begins with &quot;plt_&quot; (Platform API). The restaurant POS integration requires an Apps API key.
+              </p>
+            )}
           </div>
         </div>
 
@@ -168,9 +197,9 @@ export const ConnectionStatusPanel: React.FC<ConnectionStatusPanelProps> = ({
           </div>
           <div className="h-6 w-px bg-slate-200" />
           <div className="flex flex-col">
-            <span className="text-slate-400 font-medium uppercase text-[10px]">Data Mode</span>
-            <span className="font-semibold text-slate-800 uppercase">
-              {info.mode === 'demo' ? 'Demo Sandbox' : 'Live Gateway'}
+            <span className="text-slate-400 font-medium uppercase text-[10px]">Config Source</span>
+            <span className="font-semibold text-slate-800">
+              {info.configSource === 'custom_runtime' ? 'Runtime (In-Memory)' : 'Environment (Cloud Run)'}
             </span>
           </div>
         </div>

@@ -3,7 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { EwityLocation, EwityUser, EwityBillSummary, EwityBillDetail, EwityBillListResponse } from '../types/ewity';
+import {
+  EwityLocation,
+  EwityUser,
+  EwityBillSummary,
+  EwityBillDetail,
+  EwityBillListResponse,
+  TestConnectionResult,
+} from '../types/ewity';
 
 export interface EwityClientConfig {
   baseUrl: string;
@@ -35,8 +42,8 @@ export class EwityApiClient {
 
   constructor(config: EwityClientConfig) {
     this.baseUrl = (config.baseUrl || 'https://api.ewitypos.com/apps-v1').replace(/\/$/, '');
-    this.apiKey = config.apiKey || '';
-    this.storeId = config.storeId && !config.storeId.startsWith('http') ? config.storeId : '';
+    this.apiKey = (config.apiKey || '').trim();
+    this.storeId = config.storeId && !config.storeId.startsWith('http') ? config.storeId.trim() : '';
     this.timeoutMs = config.timeoutMs || 10000;
     this.maxRetries = config.maxRetries || 3;
   }
@@ -46,45 +53,243 @@ export class EwityApiClient {
   }
 
   public updateCredentials(apiKey: string, storeId: string, baseUrl?: string) {
-    this.apiKey = apiKey;
+    this.apiKey = (apiKey || '').trim();
+    this.storeId = storeId && !storeId.startsWith('http') ? storeId.trim() : '';
     this.isAppAccessAuthorized = null;
-    if (storeId && !storeId.startsWith('http')) {
-      this.storeId = storeId;
-    }
     if (baseUrl && baseUrl.startsWith('http')) {
       this.baseUrl = baseUrl.replace(/\/$/, '');
     }
   }
 
   public hasAuthorizedAppAccess(): boolean {
-    return this.isAppAccessAuthorized !== false;
+    return this.isAppAccessAuthorized === true;
   }
 
   public resetAppAccessState() {
     this.isAppAccessAuthorized = null;
   }
 
-  public isPlatformMode(): boolean {
-    return this.baseUrl.includes('platform-v1') || this.apiKey.startsWith('plt_');
+  public isPlatformKey(): boolean {
+    return Boolean(this.apiKey && this.apiKey.startsWith('plt_'));
   }
 
-  public hasCredentials(): boolean {
-    if (!this.apiKey || this.apiKey.trim() === '') return false;
-    // In Platform API mode (platform-v1 or plt_ token), store ID is auto-discovered from GET /stores
-    if (this.isPlatformMode()) return true;
+  public isPlatformMode(): boolean {
+    return this.baseUrl.includes('platform-v1') || this.isPlatformKey();
+  }
+
+  public hasApiKey(): boolean {
+    return Boolean(this.apiKey && this.apiKey.trim() !== '');
+  }
+
+  public hasStoreId(): boolean {
     return Boolean(this.storeId && this.storeId.trim() !== '' && !this.storeId.startsWith('http'));
+  }
+
+  /**
+   * STRICT: An Ewity Apps API restaurant connection requires BOTH an API key
+   * and the specific merchant store installation ID ('X-Ewity-Store').
+   */
+  public hasCredentials(): boolean {
+    return this.hasApiKey() && this.hasStoreId();
   }
 
   public getMaskedCredentials() {
     return {
       baseUrl: this.baseUrl,
-      apiKeyMasked: this.apiKey ? `${this.apiKey.slice(0, 4)}...${this.apiKey.slice(-4)}` : '(not configured)',
-      storeId: this.storeId || (this.isPlatformMode() ? '(auto-discovered via /stores)' : '(not configured)'),
-      hasApiKey: Boolean(this.apiKey),
-      hasStoreId: Boolean(this.storeId),
+      apiKeyMasked: this.apiKey
+        ? `${this.apiKey.slice(0, 4)}...${this.apiKey.slice(-4)}`
+        : '(not configured)',
+      storeId: this.storeId || '(not configured)',
+      hasApiKey: this.hasApiKey(),
+      hasStoreId: this.hasStoreId(),
       isPlatformMode: this.isPlatformMode(),
+      isPlatformKeyWarning: this.isPlatformKey(),
       isAppAccessAuthorized: this.isAppAccessAuthorized,
     };
+  }
+
+  /**
+   * Executes a genuine, read-only test request against the Ewity Apps API
+   * with the currently configured API key and store ID.
+   * Path: GET https://api.ewitypos.com/apps-v1/locations/user
+   * Headers:
+   *   Authorization: Bearer <EWITY_APP_API_KEY>
+   *   X-Ewity-Store: <STORE_ID>
+   *
+   * Accurately categorizes all outcome states:
+   * - NOT CONFIGURED (missing key or store ID)
+   * - AUTHENTICATION FAILED (invalid/expired credentials)
+   * - AWAITING MERCHANT APPROVAL (store app not yet approved by merchant)
+   * - PERMISSION ERROR (insufficient permissions)
+   * - CONNECTION ERROR (network failure, timeout, 5xx)
+   * - LIVE CONNECTED (successful authenticated Apps API response)
+   */
+  public async testAppsApiConnection(): Promise<TestConnectionResult> {
+    const testedAt = Date.now();
+    const endpoint = 'https://api.ewitypos.com/apps-v1/locations/user';
+    const isPlatformWarning = this.isPlatformKey();
+
+    if (!this.hasApiKey()) {
+      return {
+        outcome: 'NOT CONFIGURED',
+        success: false,
+        message: 'Missing API key. Provide EWITY_APP_API_KEY for the installed app.',
+        testedAt,
+        endpoint,
+        isPlatformKeyWarning: isPlatformWarning,
+      };
+    }
+
+    if (!this.hasStoreId()) {
+      return {
+        outcome: 'NOT CONFIGURED',
+        success: false,
+        message: 'Missing Store ID. The Apps API requires X-Ewity-Store specifying the installed store ID.',
+        testedAt,
+        endpoint,
+        isPlatformKeyWarning: isPlatformWarning,
+      };
+    }
+
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${this.apiKey}`,
+      'X-Ewity-Store': this.storeId,
+      'Accept': 'application/json',
+      'Content-Type': 'application/json',
+    };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const startTime = Date.now();
+
+    try {
+      const response = await fetch(endpoint, {
+        method: 'GET',
+        headers,
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      const durationMs = Date.now() - startTime;
+      const status = response.status;
+
+      let responseText = '';
+      let responseJson: any = null;
+      try {
+        responseText = await response.text();
+        responseJson = JSON.parse(responseText);
+      } catch {
+        // text is in responseText
+      }
+
+      const errorText = responseJson?.message || responseText || response.statusText;
+
+      this.log({
+        timestamp: new Date().toISOString(),
+        method: 'GET',
+        path: '/locations/user',
+        statusCode: status,
+        durationMs,
+        error: response.ok ? undefined : `HTTP ${status}: ${errorText}`,
+      });
+
+      if (response.ok) {
+        this.lastSuccessfulApiRequestAt = Date.now();
+        this.isAppAccessAuthorized = true;
+        const locations = Array.isArray(responseJson)
+          ? responseJson
+          : Array.isArray(responseJson?.data)
+          ? responseJson.data
+          : [];
+
+        return {
+          outcome: 'LIVE CONNECTED',
+          success: true,
+          message: `Successfully connected to Ewity Apps API for store #${this.storeId}. Verified ${locations.length} location(s).`,
+          testedAt: Date.now(),
+          httpStatus: 200,
+          endpoint,
+          storeId: this.storeId,
+          locationsCount: locations.length,
+          isPlatformKeyWarning: isPlatformWarning,
+        };
+      }
+
+      if (status === 401) {
+        this.isAppAccessAuthorized = false;
+        const lowerErr = errorText.toLowerCase();
+        if (
+          lowerErr.includes('not authorized app access') ||
+          lowerErr.includes('install the app') ||
+          lowerErr.includes('approve its permissions')
+        ) {
+          return {
+            outcome: 'AWAITING MERCHANT APPROVAL',
+            success: false,
+            message: `Merchant authorization pending: Store #${this.storeId} has not approved app access. The business must install the app and approve permissions in the Ewity App Store.`,
+            testedAt: Date.now(),
+            httpStatus: 401,
+            endpoint,
+            storeId: this.storeId,
+            isPlatformKeyWarning: isPlatformWarning,
+          };
+        }
+
+        return {
+          outcome: 'AUTHENTICATION FAILED',
+          success: false,
+          message: isPlatformWarning
+            ? `Authentication failed: The configured key starts with "plt_", which is a Platform API token. The restaurant POS integration requires an Apps API key from an installed app.`
+            : `Authentication failed: Invalid or expired API credentials for store #${this.storeId}.`,
+          testedAt: Date.now(),
+          httpStatus: 401,
+          endpoint,
+          storeId: this.storeId,
+          isPlatformKeyWarning: isPlatformWarning,
+        };
+      }
+
+      if (status === 403) {
+        this.isAppAccessAuthorized = false;
+        return {
+          outcome: 'PERMISSION ERROR',
+          success: false,
+          message: `Permission denied: Store #${this.storeId} credentials lack required access permissions.`,
+          testedAt: Date.now(),
+          httpStatus: 403,
+          endpoint,
+          storeId: this.storeId,
+          isPlatformKeyWarning: isPlatformWarning,
+        };
+      }
+
+      return {
+        outcome: 'CONNECTION ERROR',
+        success: false,
+        message: `Ewity Apps API responded with HTTP ${status}: ${errorText}`,
+        testedAt: Date.now(),
+        httpStatus: status,
+        endpoint,
+        storeId: this.storeId,
+        isPlatformKeyWarning: isPlatformWarning,
+      };
+    } catch (err: any) {
+      clearTimeout(timer);
+      const isTimeout =
+        err.name === 'AbortError' ||
+        err.message?.includes('timeout') ||
+        err.message?.includes('aborted');
+      return {
+        outcome: 'CONNECTION ERROR',
+        success: false,
+        message: isTimeout
+          ? `Connection timed out after ${this.timeoutMs}ms while contacting Ewity Apps API.`
+          : `Network error contacting Ewity Apps API: ${err.message}`,
+        testedAt: Date.now(),
+        endpoint,
+        storeId: this.storeId,
+        isPlatformKeyWarning: isPlatformWarning,
+      };
+    }
   }
 
   public getLogs(): RequestLog[] {
@@ -113,7 +318,7 @@ export class EwityApiClient {
     attempt: number = 1
   ): Promise<T> {
     if (!this.hasCredentials()) {
-      throw new Error('Ewity API credentials not configured. Please supply EWITY_APP_API_KEY.');
+      throw new Error('Ewity Apps API credentials not configured. Please supply both EWITY_APP_API_KEY and EWITY_STORE_ID.');
     }
 
     // Properly route Apps API endpoints (/sales/*, /users/*, /locations/user) to apps-v1

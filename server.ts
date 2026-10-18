@@ -15,7 +15,7 @@ import { EwityAppUiService } from './src/server/ewityAppUi';
 import { EwityReconciliationWorker } from './src/server/ewityReconciliation';
 import { runEwityMockTestSuite, MOCK_EWITY_BILLS } from './src/server/ewityMockFixtures';
 import { mapEwityBillToOrder } from './src/services/ewityMapper';
-import { EwityLocation, EwityBillSummary, EwityConnectionInfo, EwityConnectionStatus } from './src/types/ewity';
+import { EwityLocation, EwityBillSummary, EwityConnectionInfo, EwityConnectionStatus, TestConnectionResult } from './src/types/ewity';
 import { Order, OrderDataSource } from './src/types';
 
 dotenv.config();
@@ -118,12 +118,14 @@ let liveOrdersCache: Order[] = initialLoaded.orders;
 let lastSyncTimestamp: number | null = null;
 let lastSuccessfulApiRequestAt: number | null = null;
 let lastSuccessfulReconciliationAt: number | null = null;
+let activeConfigSource: 'environment' | 'custom_runtime' = 'environment';
 let isDemoModeActive: boolean = false;
-let currentConnectionStatus: EwityConnectionStatus = ewityClient.hasCredentials() ? 'Connecting' : 'NOT CONNECTED';
+let currentConnectionStatus: EwityConnectionStatus = ewityClient.hasCredentials() ? 'Connecting' : 'NOT CONFIGURED';
 let currentCompanyInfo: any = null;
 let currentAuthorities: string[] = [];
 let cachedLocations: EwityLocation[] = [];
 let lastErrorMessage: string | undefined = ewityClient.hasCredentials() ? undefined : 'No Ewity credentials configured.';
+let lastTestOutcome: TestConnectionResult | null = null;
 
 // Periodic reconciliation worker
 const reconciler = new EwityReconciliationWorker(
@@ -187,7 +189,15 @@ async function startServer() {
     }
 
     if (!ewityClient.hasCredentials()) {
-      return { status: 'NOT CONNECTED', isDataStale: false };
+      return { status: 'NOT CONFIGURED', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'AUTHENTICATION FAILED') {
+      return { status: 'AUTHENTICATION FAILED', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'AWAITING MERCHANT APPROVAL') {
+      return { status: 'AWAITING MERCHANT APPROVAL', isDataStale: false };
     }
 
     if (currentConnectionStatus === 'PERMISSION ERROR') {
@@ -196,6 +206,10 @@ async function startServer() {
 
     if (currentConnectionStatus === 'CONNECTION ERROR') {
       return { status: 'CONNECTION ERROR', isDataStale: false };
+    }
+
+    if (currentConnectionStatus === 'NOT CONNECTED') {
+      return { status: 'NOT CONNECTED', isDataStale: false };
     }
 
     if (currentConnectionStatus === 'Connecting') {
@@ -222,8 +236,8 @@ async function startServer() {
 
   /**
    * GET /api/ewity/status
-   * Reports truthful connection state, freshness, and merchant store identity.
-   * Requirement 2: Never shows LIVE CONNECTED unless a real authenticated API request succeeded.
+   * Reports truthful connection state, freshness, configuration source, and merchant store identity.
+   * Requirement: Never shows LIVE CONNECTED unless a real authenticated Apps API request succeeded.
    */
   app.get('/api/ewity/status', async (_req, res) => {
     const masked = ewityClient.getMaskedCredentials();
@@ -241,6 +255,10 @@ async function startServer() {
       isConnected: isActuallyConnected,
       storeId: masked.storeId,
       hasApiKey: masked.hasApiKey,
+      hasStoreId: masked.hasStoreId,
+      apiKeyMasked: masked.apiKeyMasked,
+      isPlatformKeyWarning: masked.isPlatformKeyWarning,
+      configSource: activeConfigSource,
       hasSigningSecret: ewityWebhook.hasSecret(),
       hasAppUiSecret: ewityAppUi.hasSigningSecret(),
       appUiEndpoint: '/ewity/app',
@@ -262,101 +280,160 @@ async function startServer() {
           }
         : undefined,
       latestSafeErrorMessage: lastErrorMessage,
+      lastErrorMessage,
       isDataStale,
       staleThresholdSec: 120,
       lastError: lastErrorMessage,
       reconciliationActive: reconciler.getStats().isRunning,
       lastReconciliationAt: reconciler.getStats().lastRunAt || undefined,
+      lastTestedAt: lastTestOutcome?.testedAt || null,
+      testOutcome: lastTestOutcome,
     };
 
     res.json(info);
   });
 
   /**
-   * POST /api/ewity/connect
-   * Authenticates against Ewity API with provided or existing environment credentials.
-   * Sets truthful status: LIVE CONNECTED, PERMISSION ERROR, or CONNECTION ERROR.
+   * POST /api/ewity/test-connection
+   * Real, read-only test request to Ewity Apps API.
+   * Tests currently configured credentials or provided test credentials.
+   * Updates server status solely from the verified outcome.
    */
-  app.post('/api/ewity/connect', async (req, res) => {
-    const { apiKey, storeId, baseUrl, webhookSecret } = req.body || {};
+  app.post('/api/ewity/test-connection', async (req, res) => {
+    const { apiKey, storeId, baseUrl, resetToEnv } = req.body || {};
 
-    const effectiveApiKey = apiKey || process.env.EWITY_APP_API_KEY || '';
-    const effectiveStoreId = (storeId && !storeId.startsWith('http')) ? storeId : (process.env.EWITY_STORE_ID || '');
-    const effectiveBaseUrl = (baseUrl && baseUrl.startsWith('http')) ? baseUrl : process.env.EWITY_API_BASE_URL;
-
-    if (effectiveApiKey || effectiveStoreId || effectiveBaseUrl) {
+    if (resetToEnv) {
+      activeConfigSource = 'environment';
       ewityClient.updateCredentials(
-        effectiveApiKey,
-        effectiveStoreId,
-        effectiveBaseUrl
+        process.env.EWITY_APP_API_KEY || '',
+        process.env.EWITY_STORE_ID || '',
+        process.env.EWITY_API_BASE_URL
+      );
+    } else if (typeof apiKey === 'string' || typeof storeId === 'string' || typeof baseUrl === 'string') {
+      activeConfigSource = 'custom_runtime';
+      ewityClient.updateCredentials(
+        typeof apiKey === 'string' ? apiKey : '',
+        typeof storeId === 'string' ? storeId : '',
+        typeof baseUrl === 'string' ? baseUrl : undefined
       );
     }
+
+    const testRes = await ewityClient.testAppsApiConnection();
+    lastTestOutcome = { ...testRes, configSource: activeConfigSource };
+
+    if (testRes.success) {
+      currentConnectionStatus = 'LIVE CONNECTED';
+      lastErrorMessage = undefined;
+      lastSuccessfulApiRequestAt = Date.now();
+      lastSyncTimestamp = Date.now();
+      try {
+        cachedLocations = await ewityClient.getLocations();
+      } catch {
+        // ignore location list failure
+      }
+      reconciler.start();
+    } else {
+      currentConnectionStatus = testRes.outcome;
+      lastErrorMessage = testRes.message;
+      reconciler.stop();
+    }
+
+    return res.json({
+      ...lastTestOutcome,
+      status: currentConnectionStatus,
+    });
+  });
+
+  /**
+   * POST /api/ewity/connect
+   * Validates credentials against Ewity Apps API.
+   * STRICT: Does not silently fall back to environment variables when custom runtime credentials are submitted.
+   * Sets truthful status: LIVE CONNECTED, AWAITING MERCHANT APPROVAL, AUTHENTICATION FAILED, PERMISSION ERROR, or CONNECTION ERROR.
+   */
+  app.post('/api/ewity/connect', async (req, res) => {
+    const { apiKey, storeId, baseUrl, webhookSecret, resetToEnv } = req.body || {};
+
+    if (resetToEnv) {
+      activeConfigSource = 'environment';
+      ewityClient.updateCredentials(
+        process.env.EWITY_APP_API_KEY || '',
+        process.env.EWITY_STORE_ID || '',
+        process.env.EWITY_API_BASE_URL
+      );
+    } else {
+      activeConfigSource = 'custom_runtime';
+      // Use exact values provided; do not secretly substitute process.env
+      ewityClient.updateCredentials(
+        typeof apiKey === 'string' ? apiKey : '',
+        typeof storeId === 'string' ? storeId : '',
+        typeof baseUrl === 'string' ? baseUrl : undefined
+      );
+    }
+
     if (webhookSecret) {
       ewityWebhook.setSigningSecret(webhookSecret);
       ewityAppUi.setSigningSecret(webhookSecret);
     }
 
     if (!ewityClient.hasCredentials()) {
-      currentConnectionStatus = 'NOT CONNECTED';
-      lastErrorMessage = 'Missing Ewity API credentials. Please provide EWITY_APP_API_KEY.';
+      currentConnectionStatus = 'NOT CONFIGURED';
+      lastErrorMessage = !ewityClient.hasApiKey()
+        ? 'Missing EWITY_APP_API_KEY. Please provide the Apps API key.'
+        : 'Missing EWITY_STORE_ID. Please specify the installed merchant store ID.';
       return res.status(400).json({
         success: false,
         status: currentConnectionStatus,
         error: lastErrorMessage,
+        configSource: activeConfigSource,
       });
     }
 
     currentConnectionStatus = 'Connecting';
 
-    try {
-      // 1. Authenticate calling user & retrieve authorities from real Ewity API
-      const user = await ewityClient.getCurrentUser();
-      currentCompanyInfo = user.company;
-      currentAuthorities = user.authorities || [];
-      lastSuccessfulApiRequestAt = Date.now();
+    const testRes = await ewityClient.testAppsApiConnection();
+    lastTestOutcome = { ...testRes, configSource: activeConfigSource };
 
-      // 2. Fetch authorized locations
-      cachedLocations = await ewityClient.getLocations();
-
-      // 3. Permission checks (requires bill history or store administration roles)
-      const hasBillPerm = currentAuthorities.some((a) =>
-        a.includes('p/r-bill-history') || a.includes('p/r-bill') || a.includes('p/r-store')
-      );
-
-      if (!hasBillPerm) {
-        currentConnectionStatus = 'PERMISSION ERROR';
-        lastErrorMessage =
-          'Connected, but merchant credentials lack required role: "p/r-bill-history" or "p/r-store".';
-        return res.status(403).json({
-          success: false,
-          status: currentConnectionStatus,
-          error: lastErrorMessage,
-          authorities: currentAuthorities,
-        });
-      }
-
+    if (testRes.success) {
       currentConnectionStatus = 'LIVE CONNECTED';
       isDemoModeActive = false;
       lastErrorMessage = undefined;
       lastSyncTimestamp = Date.now();
+      lastSuccessfulApiRequestAt = Date.now();
 
-      // Start periodic reconciliation worker
+      try {
+        cachedLocations = await ewityClient.getLocations();
+      } catch {
+        // ignore
+      }
+
       reconciler.start();
 
       return res.json({
         success: true,
         status: currentConnectionStatus,
-        company: currentCompanyInfo,
-        authorities: currentAuthorities,
+        message: testRes.message,
+        storeId: testRes.storeId,
+        locationsCount: testRes.locationsCount,
         locations: cachedLocations,
+        configSource: activeConfigSource,
       });
-    } catch (err: any) {
-      currentConnectionStatus = 'CONNECTION ERROR';
-      lastErrorMessage = err.message || 'Failed to authenticate with Ewity API';
-      return res.status(502).json({
+    } else {
+      currentConnectionStatus = testRes.outcome;
+      lastErrorMessage = testRes.message;
+      reconciler.stop();
+
+      const httpCode = testRes.httpStatus && testRes.httpStatus >= 400 && testRes.httpStatus <= 599
+        ? testRes.httpStatus
+        : 400;
+
+      return res.status(httpCode).json({
         success: false,
         status: currentConnectionStatus,
-        error: lastErrorMessage,
+        error: testRes.message,
+        outcome: testRes.outcome,
+        httpStatus: testRes.httpStatus,
+        isPlatformKeyWarning: testRes.isPlatformKeyWarning,
+        configSource: activeConfigSource,
       });
     }
   });
@@ -370,7 +447,8 @@ async function startServer() {
     currentConnectionStatus = 'NOT CONNECTED';
     isDemoModeActive = false;
     lastErrorMessage = undefined;
-    res.json({ success: true, status: 'NOT CONNECTED', mode: 'live' });
+    lastTestOutcome = null;
+    res.json({ success: true, status: 'NOT CONNECTED', mode: 'live', configSource: activeConfigSource });
   });
 
   /**
@@ -856,40 +934,41 @@ async function startServer() {
     });
   }
 
-  // Automatically verify and connect if valid environment credentials are provided
+  // Automatically verify against official Ewity Apps API on startup if environment credentials are provided
   if (ewityClient.hasCredentials()) {
     try {
-      console.log('[EWITY-WATCHDOG] Authenticating with Ewity POS using environment credentials...');
-      const user = await ewityClient.getCurrentUser();
-      currentCompanyInfo = user.company;
-      currentAuthorities = user.authorities || [];
-      cachedLocations = await ewityClient.getLocations();
-      lastSuccessfulApiRequestAt = Date.now();
+      console.log('[EWITY-WATCHDOG] Validating Ewity Apps API with environment credentials...');
+      const testRes = await ewityClient.testAppsApiConnection();
+      lastTestOutcome = { ...testRes, configSource: 'environment' };
 
-      const hasBillPerm = currentAuthorities.some((a) =>
-        a.includes('p/r-bill-history') || a.includes('p/r-bill') || a.includes('p/r-store')
-      );
-
-      if (!hasBillPerm) {
-        currentConnectionStatus = 'PERMISSION ERROR';
-        lastErrorMessage =
-          'Connected to store, but required role "p/r-bill-history" is not approved.';
-        console.warn(`[EWITY-WATCHDOG] ⚠ ${lastErrorMessage}`);
-      } else {
+      if (testRes.success) {
         currentConnectionStatus = 'LIVE CONNECTED';
         lastErrorMessage = undefined;
         lastSyncTimestamp = Date.now();
+        lastSuccessfulApiRequestAt = Date.now();
+        try {
+          cachedLocations = await ewityClient.getLocations();
+        } catch {
+          // ignore location list failure
+        }
         reconciler.start();
-        console.log(`[EWITY-WATCHDOG] ✓ Successfully connected to Ewity POS (${user.company?.name || user.name}) with ${cachedLocations.length} location(s).`);
+        console.log(`[EWITY-WATCHDOG] ✓ ${testRes.message}`);
+      } else {
+        currentConnectionStatus = testRes.outcome;
+        lastErrorMessage = testRes.message;
+        console.warn(`[EWITY-WATCHDOG] ⚠ Connection check failed (${testRes.outcome}): ${testRes.message}`);
       }
     } catch (err: any) {
-      console.warn('[EWITY-WATCHDOG] Initial connection verification notice:', err.message);
+      console.warn('[EWITY-WATCHDOG] Initial connection verification error:', err.message);
       currentConnectionStatus = 'CONNECTION ERROR';
       lastErrorMessage = err.message || 'Failed to authenticate with Ewity API';
     }
   } else {
-    currentConnectionStatus = 'NOT CONNECTED';
-    lastErrorMessage = 'No Ewity credentials configured.';
+    currentConnectionStatus = 'NOT CONFIGURED';
+    lastErrorMessage = !ewityClient.hasApiKey()
+      ? 'Missing EWITY_APP_API_KEY. Please configure Apps API credentials.'
+      : 'Missing EWITY_STORE_ID. Specify the installed merchant store ID.';
+    console.log(`[EWITY-WATCHDOG] Credentials not fully configured: ${lastErrorMessage}`);
   }
 
   app.listen(PORT, '0.0.0.0', () => {
