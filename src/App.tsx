@@ -58,12 +58,35 @@ export default function App() {
   const [currentTime, setCurrentTime] = useState<number>(Date.now());
   const [currentView, setCurrentView] = useState<DashboardView>('active_orders');
 
+  // Detect if running inside Ewity POS App UI iframe or at /ewity/app
+  const [isEmbeddedInEwityPos] = useState<boolean>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return (
+        params.get('embedded') === '1' ||
+        window.location.pathname.startsWith('/ewity/app') ||
+        window.self !== window.top
+      );
+    } catch {
+      return false;
+    }
+  });
+
+  const [initialStoreIdFromUrl] = useState<string | null>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('store_id');
+    } catch {
+      return null;
+    }
+  });
+
   // Ewity Apps API Integration State
   const [ewityInfo, setEwityInfo] = useState<EwityConnectionInfo>({
     mode: 'live',
     status: 'NOT CONNECTED',
     isConnected: false,
-    storeId: null,
+    storeId: initialStoreIdFromUrl,
     hasApiKey: false,
     hasSigningSecret: false,
     authorities: [],
@@ -644,6 +667,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-100 flex flex-col font-sans">
+      {/* 0. Ewity POS Embedded Bar */}
+      {isEmbeddedInEwityPos && (
+        <div className="bg-slate-900 text-slate-200 text-xs px-4 py-1.5 flex items-center justify-between border-b border-slate-800 font-medium z-30">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="font-semibold text-white">Ewity POS App UI</span>
+            <span className="text-slate-400 text-[11px]">/ewity/app</span>
+            {ewityInfo.storeId && (
+              <span className="bg-purple-950 text-purple-300 border border-purple-800/60 px-2 py-0.5 rounded text-[11px] font-mono">
+                Store #{ewityInfo.storeId}
+              </span>
+            )}
+          </div>
+          <span className="text-[11px] text-slate-400 font-mono">Embedded IframeView</span>
+        </div>
+      )}
+
       {/* 1. Dashboard Header */}
       <Header
         locations={availableLocations}

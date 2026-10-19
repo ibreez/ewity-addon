@@ -16,7 +16,9 @@ import { EwityReconciliationWorker } from './src/server/ewityReconciliation';
 import { runEwityMockTestSuite, MOCK_EWITY_BILLS } from './src/server/ewityMockFixtures';
 import { mapEwityBillToOrder } from './src/services/ewityMapper';
 import { EwityLocation, EwityBillSummary, EwityConnectionInfo, EwityConnectionStatus, TestConnectionResult } from './src/types/ewity';
-import { Order, OrderDataSource } from './src/types';
+import { Order, OrderDataSource, Alert, MonitoringSettings } from './src/types';
+import { evaluateMonitoringRules } from './src/services/monitoringRules';
+import { generateSimulatedOrder } from './src/services/mockOrderService';
 
 dotenv.config();
 
@@ -126,6 +128,18 @@ let currentAuthorities: string[] = [];
 let cachedLocations: EwityLocation[] = [];
 let lastErrorMessage: string | undefined = ewityClient.hasCredentials() ? undefined : 'No Ewity credentials configured.';
 let lastTestOutcome: TestConnectionResult | null = null;
+let watchdogSettings: MonitoringSettings = {
+  kotConfirmationTimeoutSec: 60,
+  orderCompletionWarningMin: 10,
+  statusStalledWarningMin: 5,
+  alertRepeatIntervalMin: 2,
+  soundEnabled: true,
+  desktopNotificationsEnabled: true,
+  monitoringEnabled: true,
+  autoSimulateOrders: false,
+  simulationIntervalSec: 45,
+};
+let appAlerts: Alert[] = [];
 
 // Periodic reconciliation worker
 const reconciler = new EwityReconciliationWorker(
@@ -146,6 +160,27 @@ const reconciler = new EwityReconciliationWorker(
 
 async function startServer() {
   const app = express();
+  const isProd = process.env.NODE_ENV === 'production';
+  let vite: any = null;
+  if (!isProd) {
+    vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa',
+    });
+  }
+
+  // Permissive CORS and iframe embedding headers for Ewity POS App UI
+  app.use((req, res, next) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Ewity-Signature, X-Ewity-Context, X-Ewity-Store');
+    res.setHeader('Content-Security-Policy', "frame-ancestors *;");
+    res.removeHeader('X-Frame-Options');
+    if (req.method === 'OPTIONS') {
+      return res.sendStatus(204);
+    }
+    next();
+  });
 
   // Raw body capture middleware for webhook signature verification.
   // Preserves exact unparsed bytes in req.rawBody without mutation.
@@ -156,6 +191,24 @@ async function startServer() {
       },
     })
   );
+
+  const serveAppHtml = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Content-Security-Policy', "frame-ancestors *;");
+    res.removeHeader('X-Frame-Options');
+    if (!isProd && vite) {
+      try {
+        const htmlPath = path.resolve(__dirname, 'index.html');
+        let template = fs.readFileSync(htmlPath, 'utf-8');
+        template = await vite.transformIndexHtml(req.originalUrl || req.url, template);
+        return res.status(200).send(template);
+      } catch (e) {
+        return next(e);
+      }
+    } else {
+      return res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    }
+  };
 
   // ---------------------------------------------------------
   // SAFE HEALTH-CHECK ENDPOINTS
@@ -702,37 +755,179 @@ async function startServer() {
    * 4. Keep App UI auth separate from webhook auth
    * 5. Safe error responses, never logging secrets or raw JWTs
    */
-  app.get('/ewity/app', (req: any, res) => {
+  /**
+   * GET /ewity/app
+   * Canonical Ewity App UI Protocol (v1) Page & Tab-Content Endpoint.
+   *
+   * Transport:
+   * - Page: GET {app_ui_url}?page=<page>&company_id=&company_name=&company_domain=&store_id=&external_account_id=
+   *   → respond 200 with UI document.
+   * - Tab content: GET {app_ui_url}?page=<page>&tab=<key>&...
+   *   → respond 200 with tab-content document: {"version": 1, "components": [...]}.
+   * - Browser / Iframe UI navigation:
+   *   → serves the web application HTML.
+   */
+  app.get('/ewity/app', async (req: any, res, next) => {
+    const hasSignature = Boolean(req.headers['x-ewity-signature']);
+    const acceptsHtml = req.accepts('html') || req.headers.accept?.includes('text/html');
+    const isExplicitJson = req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !acceptsHtml);
+
+    // 1. Browser navigation or iframe embed requesting the UI:
+    if (!hasSignature && (acceptsHtml || !isExplicitJson)) {
+      return serveAppHtml(req, res, next);
+    }
+
+    // 2. Canonical Ewity App UI Protocol (v1) Request:
+    try {
+      let merchantStoreId: string | undefined = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+
+      if (hasSignature) {
+        if (!ewityAppUi.hasSigningSecret()) {
+          return res.status(500).json({
+            error: 'configuration_error',
+            message: 'Ewity signing secret is not configured on the server. Please configure EWITY_SIGNING_SECRET or EWITY_WEBHOOK_SECRET.',
+          });
+        }
+
+        const rawBody = req.rawBody || Buffer.from('');
+        const auth = ewityAppUi.authenticateRequest(req.headers, rawBody, req.query);
+
+        if (!auth.isValid) {
+          console.warn(`[EWITY-APP-UI] Rejected unauthorized App UI request: ${auth.reason}`);
+          return res.status(auth.statusCode).json({
+            error: auth.error || 'unauthorized',
+            message: auth.reason || 'Authentication failed.',
+          });
+        }
+
+        merchantStoreId = auth.merchantIdentity?.storeId || merchantStoreId;
+      }
+
+      // Re-evaluate Watchdog rules against current live state
+      const evalResult = evaluateMonitoringRules(
+        liveOrdersCache,
+        appAlerts,
+        watchdogSettings,
+        currentConnectionStatus === 'LIVE CONNECTED' ? 'LIVE CONNECTED' : 'NOT CONNECTED'
+      );
+      appAlerts = evalResult.alerts;
+
+      let doc: any;
+      if (req.query.tab) {
+        // Tab-content document: {"version": 1, "components": [...]} (no title, no tabs)
+        doc = ewityAppUi.buildTabContent(String(req.query.tab), {
+          orders: liveOrdersCache,
+          alerts: appAlerts,
+          settings: {
+            kotTimeoutSeconds: watchdogSettings.kotConfirmationTimeoutSec,
+            orderWarningMinutes: watchdogSettings.orderCompletionWarningMin,
+            soundEnabled: watchdogSettings.soundEnabled,
+            monitoringEnabled: watchdogSettings.monitoringEnabled,
+          },
+          storeId: merchantStoreId,
+          connectionStatus: currentConnectionStatus,
+        });
+      } else {
+        // Root page document (declares tabs)
+        doc = ewityAppUi.buildHomeDocument();
+      }
+
+      // Strict validation against closed schemas
+      const validation = ewityAppUi.validateDocument(doc);
+      if (!validation.isValid) {
+        console.error('[EWITY-APP-UI] Protocol validation errors:', validation.errors);
+        return res.status(400).json({
+          errorCode: 'APP_UI_INVALID',
+          data: { ui_errors: validation.errors },
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(200).json(doc);
+    } catch (err: any) {
+      console.error('[EWITY-APP-UI] Internal error in GET /ewity/app:', err?.message || 'Unknown');
+      return res.status(500).json({
+        error: 'internal_error',
+        message: 'An internal error occurred while generating the App UI specification.',
+      });
+    }
+  });
+
+  /**
+   * POST /ewity/app
+   * Canonical Ewity App UI Protocol (v1) Action Handler.
+   * Handles button clicks, row clicks, and modal form submissions.
+   */
+  app.post('/ewity/app', async (req: any, res) => {
     try {
       if (!ewityAppUi.hasSigningSecret()) {
         return res.status(500).json({
           error: 'configuration_error',
-          message: 'Ewity signing secret is not configured on the server. Please configure EWITY_SIGNING_SECRET or EWITY_WEBHOOK_SECRET.',
+          message: 'Ewity signing secret is not configured on the server.',
         });
       }
 
-      const rawBody = req.rawBody || Buffer.from('');
+      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
       const auth = ewityAppUi.authenticateRequest(req.headers, rawBody, req.query);
 
       if (!auth.isValid) {
-        console.warn(`[EWITY-APP-UI] Rejected unauthorized App UI request: ${auth.reason}`);
+        console.warn(`[EWITY-APP-UI] Rejected unauthorized Action POST: ${auth.reason}`);
         return res.status(auth.statusCode).json({
           error: auth.error || 'unauthorized',
           message: auth.reason || 'Authentication failed.',
         });
       }
 
-      // Generate compliant version: 1 App UI JSON document
-      const merchantStoreId = auth.merchantIdentity?.storeId;
-      const doc = ewityAppUi.buildAppUiDocument(DEPLOYED_APP_URL, 900, merchantStoreId);
+      const actionPost = req.body || {};
+      if (actionPost.type !== 'action' || !actionPost.action_id) {
+        return res.status(422).json({
+          message: 'Invalid action payload. Expected type: "action" with an action_id.',
+        });
+      }
+
+      const response = ewityAppUi.handleAction(actionPost, {
+        orders: liveOrdersCache,
+        alerts: appAlerts,
+        onSaveSettings: (newSettings) => {
+          if (newSettings.kotTimeoutSeconds) {
+            watchdogSettings.kotConfirmationTimeoutSec = newSettings.kotTimeoutSeconds;
+          }
+          if (newSettings.orderWarningMinutes) {
+            watchdogSettings.orderCompletionWarningMin = newSettings.orderWarningMinutes;
+          }
+          if (typeof newSettings.soundEnabled === 'boolean') {
+            watchdogSettings.soundEnabled = newSettings.soundEnabled;
+          }
+        },
+        onSimulateOrder: (preset, table) => {
+          const sim = generateSimulatedOrder(preset as any, 'loc-main', 'staff-1');
+          if (table) {
+            sim.tableNumber = table;
+          }
+          liveOrdersCache.unshift(sim);
+          persistState(liveBillsCache, liveOrdersCache);
+        },
+      });
+
+      // If action returned a document UI replacement, strictly validate it
+      if (response.ui) {
+        const val = ewityAppUi.validateDocument(response.ui);
+        if (!val.isValid) {
+          console.error('[EWITY-APP-UI] Action UI validation error:', val.errors);
+          return res.status(400).json({
+            errorCode: 'APP_UI_INVALID',
+            data: { ui_errors: val.errors },
+          });
+        }
+      }
 
       res.setHeader('Content-Type', 'application/json');
-      return res.status(200).json(doc);
+      return res.status(200).json(response);
     } catch (err: any) {
-      console.error('[EWITY-APP-UI] Internal error in /ewity/app:', err?.message || 'Unknown');
+      console.error('[EWITY-APP-UI] Error handling action:', err?.message || 'Unknown');
       return res.status(500).json({
         error: 'internal_error',
-        message: 'An internal error occurred while generating the App UI specification.',
+        message: err.message || 'Failed to process App UI action.',
       });
     }
   });
@@ -918,19 +1113,14 @@ async function startServer() {
   });
 
   // ---------------------------------------------------------
-  // VITE DEV SERVER INTEGRATION
+  // VITE DEV SERVER & SPA ROUTING INTEGRATION
   // ---------------------------------------------------------
-  const isProd = process.env.NODE_ENV === 'production';
-  if (!isProd) {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+  if (!isProd && vite) {
     app.use(vite.middlewares);
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+    app.get('*', (_req, res, next) => {
+      serveAppHtml(_req, res, next);
     });
   }
 
