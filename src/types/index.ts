@@ -37,7 +37,7 @@ export interface OrderItem {
   category: 'Mains' | 'Starters' | 'Beverages' | 'Desserts';
 }
 
-export type OrderDataSource = 'ewity_api' | 'ewity_webhook' | 'persisted' | 'simulated_fixture';
+export type OrderDataSource = 'ewity_api' | 'ewity_webhook' | 'persisted';
 
 export interface Order {
   id: string;
@@ -97,13 +97,10 @@ export interface MonitoringSettings {
   soundEnabled: boolean;             // default: true
   desktopNotificationsEnabled: boolean; // default: false
   monitoringEnabled: boolean;        // default: true
-  autoSimulateOrders: boolean;       // default: false
-  simulationIntervalSec: number;     // default: 45
 }
 
 export type ConnectionStatus =
   | 'LIVE CONNECTED'
-  | 'DEMO MODE'
   | 'NOT CONFIGURED'
   | 'NOT CONNECTED'
   | 'AUTHENTICATION FAILED'

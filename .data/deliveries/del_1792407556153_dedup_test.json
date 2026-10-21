@@ -1,0 +1,9 @@
+{
+  "deliveryId": "del_1792407556153_dedup_test",
+  "eventId": "evt_dedup_001",
+  "event": "bill.created",
+  "storeId": "pl_id_PvkAkVWKPRJssWiPOhh5RIzNfMKjVo",
+  "receivedAt": 1792407556156,
+  "status": "processed",
+  "processedAt": 1792407556158
+}

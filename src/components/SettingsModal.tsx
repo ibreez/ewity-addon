@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { MonitoringSettings } from '../types';
 import { playAlertSound } from '../utils/audio';
-import { DEFAULT_MONITORING_SETTINGS } from '../services/mockOrderService';
+import { DEFAULT_MONITORING_SETTINGS } from '../services/orderService';
 
 interface SettingsModalProps {
   isOpen: boolean;

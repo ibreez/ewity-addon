@@ -212,11 +212,17 @@ export const OrderTable: React.FC<OrderTableProps> = ({
           <tbody className="divide-y divide-slate-100">
             {filteredOrders.length === 0 ? (
               <tr>
-                <td colSpan={11} className="py-12 text-center text-slate-500">
+                <td colSpan={11} className="py-14 text-center text-slate-500">
                   <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                  <p className="font-medium text-slate-700">No orders match filter criteria</p>
-                  <p className="text-xs text-slate-400 mt-1">
-                    Try adjusting your search query, source selection, or status filters.
+                  <p className="font-semibold text-slate-700">
+                    {orders.length === 0
+                      ? 'No active kitchen orders'
+                      : 'No orders match current filter criteria'}
+                  </p>
+                  <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                    {orders.length === 0
+                      ? 'Real orders will appear automatically when placed in Ewity POS or received via webhook.'
+                      : 'Try adjusting your search query, source selection, or status filters.'}
                   </p>
                 </td>
               </tr>
@@ -277,11 +283,6 @@ export const OrderTable: React.FC<OrderTableProps> = ({
                         {order.dataSource === 'persisted' && (
                           <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
                             Persisted
-                          </span>
-                        )}
-                        {order.dataSource === 'simulated_fixture' && (
-                          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                            Demo Fixture
                           </span>
                         )}
                       </div>
@@ -398,8 +399,8 @@ export const OrderTable: React.FC<OrderTableProps> = ({
                                 e.stopPropagation();
                                 onQuickConfirmKOT(order.id);
                               }}
-                              className="px-2 py-1 text-[11px] font-semibold bg-amber-100 hover:bg-amber-200 text-amber-900 rounded border border-amber-300 transition-colors"
-                              title="Simulate KOT receipt confirmation"
+                              className="px-2 py-1 text-[11px] font-semibold bg-amber-100 hover:bg-amber-200 text-amber-900 rounded border border-amber-300 transition-colors cursor-pointer"
+                              title="Confirm KOT ticket receipt (Manual Operator Override)"
                             >
                               Confirm KOT
                             </button>

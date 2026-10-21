@@ -19,13 +19,11 @@ import { MonitoringSettings } from '../types';
 interface ThresholdRulesViewProps {
   settings: MonitoringSettings;
   onOpenSettings: () => void;
-  onTriggerSimulation: () => void;
 }
 
 export const ThresholdRulesView: React.FC<ThresholdRulesViewProps> = ({
   settings,
   onOpenSettings,
-  onTriggerSimulation,
 }) => {
   return (
     <div className="space-y-6">
@@ -47,16 +45,10 @@ export const ThresholdRulesView: React.FC<ThresholdRulesViewProps> = ({
         <div className="flex items-center gap-2">
           <button
             onClick={onOpenSettings}
-            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5"
+            className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 cursor-pointer"
           >
             <Sliders className="w-3.5 h-3.5" />
             <span>Configure Thresholds</span>
-          </button>
-          <button
-            onClick={onTriggerSimulation}
-            className="px-3.5 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-semibold shadow-xs"
-          >
-            Simulate Scenario
           </button>
         </div>
       </div>

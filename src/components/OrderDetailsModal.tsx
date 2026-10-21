@@ -178,11 +178,6 @@ export const OrderDetailsModal: React.FC<OrderDetailsModalProps> = ({
                     Persisted Local Cache
                   </span>
                 )}
-                {order.dataSource === 'simulated_fixture' && (
-                  <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
-                    Simulated Test Fixture
-                  </span>
-                )}
                 <span className="text-slate-500 text-[11px]">
                   Updated: {order.dataTimestamp ? formatClockTime(order.dataTimestamp) : formatClockTime(order.createdAt)}
                 </span>

@@ -1,0 +1,60 @@
+{
+  "storeId": "pl_id_PvkAkVWKPRJssWiPOhh5RIzNfMKjVo",
+  "updatedAt": 1792569542863,
+  "bills": [],
+  "orders": [
+    {
+      "id": "ewity-778899",
+      "orderNumber": "EW-778899",
+      "source": "POS",
+      "orderType": "Dine-in",
+      "tableNumber": "Table 14",
+      "createdAt": 1792411200000,
+      "kotNumber": "KOT-7788",
+      "kotStatus": "Confirmed",
+      "kotConfirmedAt": 1792569542859,
+      "kotStation": "Main Location Station",
+      "orderStatus": "In Kitchen",
+      "statusUpdatedAt": 1792569542863,
+      "items": [
+        {
+          "id": "bill-item-778899",
+          "name": "Bill EW-778899 Items (sale)",
+          "quantity": 1,
+          "price": 159,
+          "category": "Mains"
+        }
+      ],
+      "totalAmount": 159,
+      "guestCount": 2,
+      "serverName": "Staff",
+      "locationId": "1",
+      "alertSeverity": "nominal",
+      "activeAlertIds": [],
+      "dataSource": "ewity_webhook",
+      "dataTimestamp": 1792569542851
+    }
+  ],
+  "alerts": [],
+  "settings": {
+    "kotConfirmationTimeoutSec": 60,
+    "orderCompletionWarningMin": 10,
+    "statusStalledWarningMin": 5,
+    "alertRepeatIntervalMin": 2,
+    "soundEnabled": true,
+    "desktopNotificationsEnabled": false,
+    "monitoringEnabled": true
+  },
+  "auditLog": [
+    {
+      "id": "audit_1792569542863_gkouv",
+      "action": "order_status_updated",
+      "performedBy": "Chef Michael",
+      "timestamp": 1792569542863,
+      "details": {
+        "orderId": "ewity-778899",
+        "newStatus": "In Kitchen"
+      }
+    }
+  ]
+}

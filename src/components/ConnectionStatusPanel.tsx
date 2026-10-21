@@ -13,7 +13,6 @@ import {
   Building,
   KeyRound,
   RotateCw,
-  FlaskConical,
   ExternalLink,
 } from 'lucide-react';
 import { EwityConnectionInfo, EwityConnectionStatus } from '../types/ewity';
@@ -22,16 +21,12 @@ import { formatClockTime } from '../utils/time';
 interface ConnectionStatusPanelProps {
   info: EwityConnectionInfo;
   onOpenIntegration: () => void;
-  onEnableDemoMode: () => void;
-  onDisableDemoMode: () => void;
   onRefresh?: () => void;
 }
 
 export const ConnectionStatusPanel: React.FC<ConnectionStatusPanelProps> = ({
   info,
   onOpenIntegration,
-  onEnableDemoMode,
-  onDisableDemoMode,
   onRefresh,
 }) => {
   const status: EwityConnectionStatus = info.status || 'NOT CONNECTED';
@@ -45,14 +40,6 @@ export const ConnectionStatusPanel: React.FC<ConnectionStatusPanelProps> = ({
           bg: 'bg-emerald-500/10 border-emerald-500/30 text-emerald-800',
           dot: 'bg-emerald-500 animate-pulse',
           description: 'Authenticated with live Ewity POS. Real sales and KOT events flowing.',
-        };
-      case 'DEMO MODE':
-        return {
-          label: 'DEMO MODE (SANDBOX)',
-          icon: FlaskConical,
-          bg: 'bg-amber-500/10 border-amber-500/30 text-amber-900',
-          dot: 'bg-amber-500',
-          description: 'Displaying simulated test fixtures. No live restaurant orders affected.',
         };
       case 'NOT CONFIGURED':
         return {
@@ -217,29 +204,10 @@ export const ConnectionStatusPanel: React.FC<ConnectionStatusPanelProps> = ({
             </button>
           )}
 
-          {info.mode === 'demo' ? (
-            <button
-              type="button"
-              onClick={onDisableDemoMode}
-              className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors"
-            >
-              Switch to Live Mode
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={onEnableDemoMode}
-              className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-slate-950 rounded-lg text-xs font-semibold shadow-xs transition-colors flex items-center gap-1"
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              <span>Enable Demo Mode</span>
-            </button>
-          )}
-
           <button
             type="button"
             onClick={onOpenIntegration}
-            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold border border-slate-300 transition-colors flex items-center gap-1"
+            className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-lg text-xs font-semibold border border-slate-300 transition-colors flex items-center gap-1 cursor-pointer"
           >
             <span>Credentials</span>
             <ExternalLink className="w-3 h-3 text-slate-400" />

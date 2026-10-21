@@ -7,8 +7,6 @@ import React from 'react';
 import {
   Bell,
   Settings,
-  PlusCircle,
-  RotateCcw,
   ShieldAlert,
   Store,
   UserCheck,
@@ -30,10 +28,7 @@ interface HeaderProps {
   monitoringEnabled: boolean;
   onToggleMonitoring: () => void;
   connectionStatus: ConnectionStatus;
-  onToggleConnection: () => void;
   onOpenSettings: () => void;
-  onOpenSimulateOrder: () => void;
-  onResetData: () => void;
   unreadAlertCount: number;
   onOpenAlerts: () => void;
   ewityStatus?: EwityConnectionStatus;
@@ -50,13 +45,10 @@ export const Header: React.FC<HeaderProps> = ({
   monitoringEnabled,
   onToggleMonitoring,
   connectionStatus,
-  onToggleConnection,
   onOpenSettings,
-  onOpenSimulateOrder,
-  onResetData,
   unreadAlertCount,
   onOpenAlerts,
-  ewityStatus = 'Demo Mode',
+  ewityStatus = 'NOT CONFIGURED',
   onOpenEwityIntegration,
 }) => {
   return (
@@ -79,13 +71,11 @@ export const Header: React.FC<HeaderProps> = ({
                 className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold border cursor-pointer transition-colors ${
                   ewityStatus === 'LIVE CONNECTED'
                     ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
-                    : ewityStatus === 'DEMO MODE'
-                    ? 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
                     : ewityStatus === 'Connecting'
                     ? 'bg-blue-50 text-blue-800 border-blue-300 hover:bg-blue-100'
                     : ewityStatus === 'LIVE DATA STALE'
                     ? 'bg-amber-50 text-amber-800 border-amber-300 hover:bg-amber-100'
-                    : ewityStatus === 'PERMISSION ERROR' || ewityStatus === 'CONNECTION ERROR'
+                    : ewityStatus === 'PERMISSION ERROR' || ewityStatus === 'CONNECTION ERROR' || ewityStatus === 'AUTHENTICATION FAILED'
                     ? 'bg-red-50 text-red-800 border-red-300 hover:bg-red-100'
                     : 'bg-slate-100 text-slate-700 border-slate-300 hover:bg-slate-200'
                 }`}
@@ -95,13 +85,11 @@ export const Header: React.FC<HeaderProps> = ({
                   className={`w-1.5 h-1.5 rounded-full ${
                     ewityStatus === 'LIVE CONNECTED'
                       ? 'bg-emerald-600'
-                      : ewityStatus === 'DEMO MODE'
-                      ? 'bg-amber-500'
                       : ewityStatus === 'Connecting'
                       ? 'bg-blue-600'
                       : ewityStatus === 'LIVE DATA STALE'
                       ? 'bg-amber-600'
-                      : ewityStatus === 'PERMISSION ERROR' || ewityStatus === 'CONNECTION ERROR'
+                      : ewityStatus === 'PERMISSION ERROR' || ewityStatus === 'CONNECTION ERROR' || ewityStatus === 'AUTHENTICATION FAILED'
                       ? 'bg-red-600'
                       : 'bg-slate-400'
                   }`}
@@ -152,14 +140,15 @@ export const Header: React.FC<HeaderProps> = ({
           </select>
         </div>
 
-        {/* Connection status indicator with toggle */}
+        {/* Truthful POS Connection status indicator */}
         <button
-          onClick={onToggleConnection}
-          title="Click to toggle POS connection state"
-          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors ${
+          type="button"
+          onClick={onOpenEwityIntegration}
+          title="Click to view Ewity POS connection details"
+          className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium border transition-colors cursor-pointer ${
             connectionStatus === 'LIVE CONNECTED'
               ? 'bg-emerald-50 border-emerald-200 text-emerald-800 hover:bg-emerald-100'
-              : connectionStatus === 'DEMO MODE'
+              : connectionStatus === 'LIVE DATA STALE'
               ? 'bg-amber-50 border-amber-200 text-amber-900 hover:bg-amber-100'
               : 'bg-red-50 border-red-300 text-red-800 hover:bg-red-100'
           }`}
@@ -169,10 +158,10 @@ export const Header: React.FC<HeaderProps> = ({
               <Wifi className="w-3.5 h-3.5 text-emerald-600" />
               <span>Live POS OK</span>
             </>
-          ) : connectionStatus === 'DEMO MODE' ? (
+          ) : connectionStatus === 'LIVE DATA STALE' ? (
             <>
               <Wifi className="w-3.5 h-3.5 text-amber-600" />
-              <span>Demo Mode</span>
+              <span>Data Stale</span>
             </>
           ) : (
             <>
@@ -218,29 +207,10 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </button>
 
-        {/* Quick Simulator CTA */}
-        <button
-          onClick={onOpenSimulateOrder}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white text-xs font-semibold rounded-md transition-colors shadow-2xs"
-          title="Simulate incoming order scenario"
-        >
-          <PlusCircle className="w-3.5 h-3.5" />
-          <span>+ Simulate Order</span>
-        </button>
-
-        {/* Reset Demo Data */}
-        <button
-          onClick={onResetData}
-          className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md border border-slate-200 transition-colors"
-          title="Reset demo data to initial state"
-        >
-          <RotateCcw className="w-4 h-4" />
-        </button>
-
         {/* Settings button */}
         <button
           onClick={onOpenSettings}
-          className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md border border-slate-200 transition-colors"
+          className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md border border-slate-200 transition-colors cursor-pointer"
           title="Configure monitoring thresholds"
         >
           <Settings className="w-4 h-4" />

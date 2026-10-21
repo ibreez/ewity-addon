@@ -19,16 +19,11 @@ import {
   STAFF_MEMBERS,
   loadSavedOrders,
   loadSavedLiveOrders,
-  loadDemoOrders,
   saveOrders,
   saveLiveOrders,
-  saveDemoOrders,
   loadSavedSettings,
   saveSettings,
-  getInitialMockOrders,
-  generateSimulatedOrder,
-  OrderSimulationPreset,
-} from './services/mockOrderService';
+} from './services/orderService';
 import { evaluateMonitoringRules } from './services/monitoringRules';
 import { AlertManager, ToastMessage } from './services/alertManager';
 import { Header } from './components/Header';
@@ -38,11 +33,9 @@ import { OrderTable } from './components/OrderTable';
 import { AlertPanel } from './components/AlertPanel';
 import { OrderDetailsModal } from './components/OrderDetailsModal';
 import { SettingsModal } from './components/SettingsModal';
-import { SimulateOrderModal } from './components/SimulateOrderModal';
 import { ThresholdRulesView } from './components/ThresholdRulesView';
 import { EwityIntegrationView } from './components/EwityIntegrationView';
 import { ConnectionStatusPanel } from './components/ConnectionStatusPanel';
-import { DemoDataBanner } from './components/DemoDataBanner';
 import { ToastContainer } from './components/ToastContainer';
 import { playAlertSound } from './utils/audio';
 import { EwityConnectionInfo } from './types/ewity';
@@ -81,6 +74,40 @@ export default function App() {
     }
   });
 
+  const [sessionToken] = useState<string | null>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get('session') || params.get('embed_token');
+      if (token) {
+        sessionStorage.setItem('ewity_embed_session', token);
+        return token;
+      }
+      return sessionStorage.getItem('ewity_embed_session');
+    } catch {
+      return null;
+    }
+  });
+
+  const [adminApiKey, setAdminApiKey] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem('ewity_admin_key') || '';
+    } catch {
+      return '';
+    }
+  });
+
+  const getAuthHeaders = useCallback((): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    if (sessionToken) {
+      headers['Authorization'] = `Bearer ${sessionToken}`;
+      headers['X-Ewity-Session'] = sessionToken;
+    } else if (adminApiKey) {
+      headers['Authorization'] = `Bearer ${adminApiKey}`;
+      headers['X-Admin-Key'] = adminApiKey;
+    }
+    return headers;
+  }, [sessionToken, adminApiKey]);
+
   // Ewity Apps API Integration State
   const [ewityInfo, setEwityInfo] = useState<EwityConnectionInfo>({
     mode: 'live',
@@ -98,7 +125,6 @@ export default function App() {
   // Modals & Inspectors
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
-  const [isSimulateModalOpen, setIsSimulateModalOpen] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
   // Filtering state
@@ -157,7 +183,9 @@ export default function App() {
   // Fetch Ewity connection status from backend adapter
   const fetchEwityStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/ewity/status');
+      const res = await fetch('/api/ewity/status', {
+        headers: getAuthHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         setEwityInfo(data);
@@ -176,7 +204,7 @@ export default function App() {
     } catch {
       // Backend starting up or running client-only
     }
-  }, []);
+  }, [getAuthHeaders]);
 
   useEffect(() => {
     fetchEwityStatus();
@@ -188,7 +216,9 @@ export default function App() {
   const syncEwityBills = useCallback(async () => {
     if (ewityInfo.status !== 'LIVE CONNECTED' && ewityInfo.status !== 'LIVE DATA STALE') return;
     try {
-      const res = await fetch(`/api/ewity/bills?location_id=${currentLocationId}`);
+      const res = await fetch(`/api/ewity/bills?location_id=${currentLocationId}`, {
+        headers: getAuthHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.mappedOrders)) {
@@ -200,7 +230,7 @@ export default function App() {
     } catch {
       // Graceful fallback
     }
-  }, [ewityInfo.status, currentLocationId]);
+  }, [ewityInfo.status, currentLocationId, getAuthHeaders]);
 
   useEffect(() => {
     if (ewityInfo.status === 'LIVE CONNECTED' || ewityInfo.status === 'LIVE DATA STALE') {
@@ -239,32 +269,6 @@ export default function App() {
     return () => clearInterval(timer);
   }, [alerts, settings, connectionStatus, addToast]);
 
-  // Auto-simulate order timer if enabled in settings
-  useEffect(() => {
-    if (!settings.autoSimulateOrders) return;
-    const intervalMs = (settings.simulationIntervalSec || 45) * 1000;
-    const simTimer = setInterval(() => {
-      const newOrder = generateSimulatedOrder(
-        'normal_dinein',
-        currentLocationId,
-        currentStaff.name
-      );
-      setOrders((prev) => {
-        const updated = [newOrder, ...prev];
-        saveOrders(updated);
-        return updated;
-      });
-      addToast({
-        id: `toast-auto-sim-${Date.now()}`,
-        title: 'New Simulated Order Arrived',
-        message: `${newOrder.orderNumber} placed for Table ${newOrder.tableNumber}`,
-        severity: 'info',
-        timestamp: Date.now(),
-      });
-    }, intervalMs);
-
-    return () => clearInterval(simTimer);
-  }, [settings.autoSimulateOrders, settings.simulationIntervalSec, currentLocationId, currentStaff, addToast]);
 
   // Keep selected order fresh in modal when tick updates
   useEffect(() => {
@@ -307,12 +311,13 @@ export default function App() {
     return alerts.filter((a) => a.status === 'active').length;
   }, [alerts]);
 
-  // 4. Action Handlers
+  // 4. Action Handlers with durable server persistence
   const handleQuickConfirmKOT = useCallback(
     (orderId: string) => {
       const now = Date.now();
       playAlertSound('ready');
 
+      // Optimistic local state update
       setOrders((prev) => {
         const updated = prev.map((ord) => {
           if (ord.id === orderId) {
@@ -345,6 +350,13 @@ export default function App() {
         })
       );
 
+      // Persist to server durably
+      fetch(`/api/orders/${orderId}/kot-confirm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ staffName: currentStaff.name }),
+      }).catch((err) => console.warn('Server KOT confirm sync notice:', err));
+
       const targetOrder = orders.find((o) => o.id === orderId);
       addToast({
         id: `toast-confirm-${Date.now()}`,
@@ -354,7 +366,7 @@ export default function App() {
         timestamp: now,
       });
     },
-    [orders, currentStaff, addToast]
+    [orders, currentStaff, addToast, getAuthHeaders]
   );
 
   const handleAdvanceOrderStatus = useCallback(
@@ -376,7 +388,6 @@ export default function App() {
       });
 
       if (nextStatus === 'Completed') {
-        // Resolve any open alerts for this order
         setAlerts((prevAlerts) =>
           prevAlerts.map((alt) => {
             if (alt.orderId === orderId && alt.status !== 'resolved') {
@@ -393,6 +404,13 @@ export default function App() {
         );
       }
 
+      // Persist to server durably
+      fetch(`/api/orders/${orderId}/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ status: nextStatus, staffName: currentStaff.name }),
+      }).catch((err) => console.warn('Server status sync notice:', err));
+
       addToast({
         id: `toast-status-${Date.now()}`,
         title: `Order Advanced to ${nextStatus}`,
@@ -401,7 +419,7 @@ export default function App() {
         timestamp: now,
       });
     },
-    [currentStaff, addToast]
+    [currentStaff, addToast, getAuthHeaders]
   );
 
   const handleAcknowledgeAlert = useCallback(
@@ -409,6 +427,14 @@ export default function App() {
       setAlerts((prev) =>
         AlertManager.acknowledgeAlert(prev, alertId, currentStaff.name, Date.now())
       );
+
+      // Persist to server durably
+      fetch(`/api/alerts/${alertId}/acknowledge`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ staffName: currentStaff.name }),
+      }).catch((err) => console.warn('Server alert ack notice:', err));
+
       addToast({
         id: `toast-ack-${Date.now()}`,
         title: 'Alert Acknowledged',
@@ -417,7 +443,7 @@ export default function App() {
         timestamp: Date.now(),
       });
     },
-    [currentStaff, addToast]
+    [currentStaff, addToast, getAuthHeaders]
   );
 
   const handleSnoozeAlert = useCallback(
@@ -425,6 +451,14 @@ export default function App() {
       setAlerts((prev) =>
         AlertManager.snoozeAlert(prev, alertId, currentStaff.name, minutes, Date.now())
       );
+
+      // Persist to server durably
+      fetch(`/api/alerts/${alertId}/snooze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ staffName: currentStaff.name, minutes }),
+      }).catch((err) => console.warn('Server alert snooze notice:', err));
+
       addToast({
         id: `toast-snooze-${Date.now()}`,
         title: `Alert Snoozed (+${minutes}m)`,
@@ -433,7 +467,7 @@ export default function App() {
         timestamp: Date.now(),
       });
     },
-    [currentStaff, addToast]
+    [currentStaff, addToast, getAuthHeaders]
   );
 
   const handleResolveAlert = useCallback(
@@ -441,6 +475,14 @@ export default function App() {
       setAlerts((prev) =>
         AlertManager.resolveAlert(prev, alertId, currentStaff.name, note, Date.now())
       );
+
+      // Persist to server durably
+      fetch(`/api/alerts/${alertId}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({ staffName: currentStaff.name, note }),
+      }).catch((err) => console.warn('Server alert resolve notice:', err));
+
       addToast({
         id: `toast-resolve-${Date.now()}`,
         title: 'Alert Resolved',
@@ -452,58 +494,19 @@ export default function App() {
     [currentStaff, addToast]
   );
 
-  const handleSimulateOrder = useCallback(
-    (preset: OrderSimulationPreset) => {
-      const newOrder = generateSimulatedOrder(
-        preset,
-        currentLocationId,
-        currentStaff.name
-      );
-      setOrders((prev) => {
-        const updated = [newOrder, ...prev];
-        saveOrders(updated);
-        return updated;
-      });
-
-      addToast({
-        id: `toast-sim-${Date.now()}`,
-        title: 'Simulated Order Injected',
-        message: `Order ${newOrder.orderNumber} created (${newOrder.orderType} · ${preset.replace(/_/g, ' ')})`,
-        severity: preset === 'kot_timeout_test' || preset === 'overdue_kitchen_test' ? 'warning' : 'info',
-        timestamp: Date.now(),
-      });
-    },
-    [currentLocationId, currentStaff, addToast]
-  );
-
   const handleResetData = useCallback(() => {
-    if (ewityInfo.mode === 'demo') {
-      const initial = getInitialMockOrders();
-      setOrders(initial);
-      saveDemoOrders(initial);
-      setAlerts([]);
-      AlertManager.resetNotificationCache();
-      addToast({
-        id: `toast-reset-${Date.now()}`,
-        title: 'Demo Data Reset',
-        message: 'Restored initial sample restaurant orders and cleared alert history.',
-        severity: 'info',
-        timestamp: Date.now(),
-      });
-    } else {
-      setAlerts([]);
-      AlertManager.resetNotificationCache();
-      const liveOrders = loadSavedLiveOrders();
-      setOrders(liveOrders);
-      addToast({
-        id: `toast-reset-${Date.now()}`,
-        title: 'Alert History Reset',
-        message: 'Cleared active alert notifications. Preserved authentic live orders.',
-        severity: 'info',
-        timestamp: Date.now(),
-      });
-    }
-  }, [ewityInfo.mode, addToast]);
+    setAlerts([]);
+    AlertManager.resetNotificationCache();
+    const liveOrders = loadSavedLiveOrders();
+    setOrders(liveOrders);
+    addToast({
+      id: `toast-reset-${Date.now()}`,
+      title: 'Alert History Reset',
+      message: 'Cleared active alert notifications. Preserved authentic live orders.',
+      severity: 'info',
+      timestamp: Date.now(),
+    });
+  }, [addToast]);
 
   const handleSaveSettings = useCallback(
     (updatedSettings: MonitoringSettings) => {
@@ -537,70 +540,11 @@ export default function App() {
     });
   }, [addToast]);
 
-  const handleToggleConnection = useCallback(() => {
-    setConnectionStatus((prev) => {
-      const next: ConnectionStatus =
-        prev === 'CONNECTION ERROR' ? 'LIVE CONNECTED' : 'CONNECTION ERROR';
-      addToast({
-        id: `toast-conn-${Date.now()}`,
-        title: next === 'LIVE CONNECTED' ? 'POS Gateway Reconnected' : 'POS Gateway Interrupted',
-        message:
-          next === 'LIVE CONNECTED'
-            ? 'Heartbeat restored with terminal database'
-            : 'Simulated network drop triggered (Urgent Alert)',
-        severity: next === 'LIVE CONNECTED' ? 'info' : 'urgent',
-        timestamp: Date.now(),
-      });
-      return next;
-    });
-  }, [addToast]);
-
-  const handleEnableDemoMode = async () => {
-    try {
-      await fetch('/api/ewity/demo/enable', { method: 'POST' });
-      await fetchEwityStatus();
-      setConnectionStatus('DEMO MODE');
-      const demoOrders = loadDemoOrders();
-      setOrders(demoOrders);
-      addToast({
-        id: `toast-demo-enable-${Date.now()}`,
-        title: 'Demo Mode Activated',
-        message: 'Loaded simulated restaurant fixtures. Real orders unaffected.',
-        severity: 'info',
-        timestamp: Date.now(),
-      });
-    } catch {
-      // ignore
-    }
-  };
-
-  const handleDisableDemoMode = async () => {
-    try {
-      await fetch('/api/ewity/demo/disable', { method: 'POST' });
-      await fetchEwityStatus();
-      // STRICT REQUIREMENT: Switching to Live Mode must clear demo records from visible dashboard
-      const liveOrders = loadSavedLiveOrders();
-      setOrders(liveOrders);
-      if (ewityInfo.status === 'LIVE CONNECTED' || ewityInfo.status === 'LIVE DATA STALE') {
-        syncEwityBills();
-      }
-      addToast({
-        id: `toast-demo-disable-${Date.now()}`,
-        title: 'Live Mode Active',
-        message: 'Demo fixtures cleared. Displaying authentic live restaurant data.',
-        severity: 'info',
-        timestamp: Date.now(),
-      });
-    } catch {
-      // ignore
-    }
-  };
-
   // Phase 2 Ewity Connect / Disconnect / Reconcile Handlers
   const handleConnectEwity = async (credentials: { apiKey?: string; storeId?: string; webhookSecret?: string }) => {
     const res = await fetch('/api/ewity/connect', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
       body: JSON.stringify(credentials),
     });
     const data = await res.json();
@@ -618,7 +562,10 @@ export default function App() {
   };
 
   const handleDisconnectEwity = async () => {
-    await fetch('/api/ewity/disconnect', { method: 'POST' });
+    await fetch('/api/ewity/disconnect', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
     await fetchEwityStatus();
     setOrders(loadSavedLiveOrders());
     addToast({
@@ -631,7 +578,10 @@ export default function App() {
   };
 
   const handleReconcileEwity = async () => {
-    const res = await fetch('/api/ewity/reconcile', { method: 'POST' });
+    const res = await fetch('/api/ewity/reconcile', {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
     const data = await res.json();
     await syncEwityBills();
     addToast({
@@ -695,10 +645,7 @@ export default function App() {
         monitoringEnabled={settings.monitoringEnabled}
         onToggleMonitoring={handleToggleMonitoring}
         connectionStatus={connectionStatus}
-        onToggleConnection={handleToggleConnection}
         onOpenSettings={() => setIsSettingsOpen(true)}
-        onOpenSimulateOrder={() => setIsSimulateModalOpen(true)}
-        onResetData={handleResetData}
         unreadAlertCount={unreadAlertCount}
         onOpenAlerts={() => setCurrentView('alerts_feed')}
         ewityStatus={ewityInfo.status}
@@ -738,31 +685,12 @@ export default function App() {
               </h2>
             </div>
 
-            {/* Quick Action Buttons */}
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => setIsSimulateModalOpen(true)}
-                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors flex items-center gap-1.5"
-              >
-                <span>+ Simulate Order</span>
-              </button>
-            </div>
           </div>
-
-          {/* Prominent DEMO DATA banner on every relevant screen when Demo Mode is active */}
-          {ewityInfo.mode === 'demo' && (
-            <DemoDataBanner
-              onSwitchToLive={handleDisableDemoMode}
-              onResetDemoData={handleResetData}
-            />
-          )}
 
           {/* Truthful Connection Status & Diagnostics Panel */}
           <ConnectionStatusPanel
             info={ewityInfo}
             onOpenIntegration={() => setCurrentView('ewity_integration')}
-            onEnableDemoMode={handleEnableDemoMode}
-            onDisableDemoMode={handleDisableDemoMode}
             onRefresh={fetchEwityStatus}
           />
 
@@ -807,7 +735,6 @@ export default function App() {
             <ThresholdRulesView
               settings={settings}
               onOpenSettings={() => setIsSettingsOpen(true)}
-              onTriggerSimulation={() => setIsSimulateModalOpen(true)}
             />
           )}
 
@@ -857,12 +784,6 @@ export default function App() {
         settings={settings}
         onSave={handleSaveSettings}
         onClose={() => setIsSettingsOpen(false)}
-      />
-
-      <SimulateOrderModal
-        isOpen={isSimulateModalOpen}
-        onClose={() => setIsSimulateModalOpen(false)}
-        onSimulateOrder={handleSimulateOrder}
       />
 
       {/* 4. Live Toast Alerts */}

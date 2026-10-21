@@ -21,6 +21,7 @@ export class EwityReconciliationWorker {
   private timer: NodeJS.Timeout | null = null;
   private locationId: string = 'all';
   private onBillsReconciled?: (bills: EwityBillSummary[]) => void;
+  private lastStartTime: number = 0;
   private stats: ReconciliationStats = {
     lastRunAt: null,
     isRunning: false,
@@ -70,11 +71,15 @@ export class EwityReconciliationWorker {
     }
 
     if (this.stats.isRunning) {
-      return { success: false, billsCount: 0, error: 'Reconciliation already in progress' };
+      if (this.lastStartTime && Date.now() - this.lastStartTime < 60000) {
+        return { success: false, billsCount: 0, error: 'Reconciliation already in progress' };
+      }
+      console.warn('[EWITY-RECONCILER] Previous run stalled for >60s. Resetting lock.');
     }
 
     this.stats.isRunning = true;
-    const startTime = Date.now();
+    this.lastStartTime = Date.now();
+    const startTime = this.lastStartTime;
 
     try {
       // Pull recent bills (e.g. limit 30, newest first)

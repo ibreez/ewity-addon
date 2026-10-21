@@ -193,11 +193,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               className={`font-mono font-medium ${
                 ewityConnectionStatus === 'LIVE CONNECTED'
                   ? 'text-emerald-400'
-                  : ewityConnectionStatus === 'DEMO MODE'
-                  ? 'text-amber-400'
                   : ewityConnectionStatus === 'LIVE DATA STALE'
                   ? 'text-amber-300'
-                  : ewityConnectionStatus === 'PERMISSION ERROR' || ewityConnectionStatus === 'CONNECTION ERROR'
+                  : ewityConnectionStatus === 'PERMISSION ERROR' || ewityConnectionStatus === 'CONNECTION ERROR' || ewityConnectionStatus === 'AUTHENTICATION FAILED'
                   ? 'text-rose-400'
                   : 'text-slate-400'
               }`}

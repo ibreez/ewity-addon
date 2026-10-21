@@ -47,38 +47,41 @@ export function mapEwityBillToOrder(
   }
 
   // 4. Order Lifecycle Status Mapping
-  // RULE: Bill creation != kitchen prep started. Payment != order completed.
+  // RULE: Bill creation != kitchen prep started. Payment != order completed!
   let orderStatus: OrderStatus = 'New';
 
   if (bill.type === 'void' || bill.status === 'voided') {
     orderStatus = 'Voided';
+  } else if (bill.type === 'refund' || bill.status === 'refunded') {
+    // Refunds void or cancel kitchen obligation
+    orderStatus = 'Voided';
   } else if (existingOrder && existingOrder.orderStatus !== 'New') {
-    // Preserve local kitchen advancement unless bill was voided
+    // Preserve local kitchen advancement unless bill was voided or refunded
     orderStatus = existingOrder.orderStatus;
   } else if (bill.delivery_status === 'delivered') {
     orderStatus = 'Completed';
   } else if (bill.delivery_status === 'out-for-delivery') {
     orderStatus = 'Ready';
-  } else if (bill.status === 'settled' && !bill.restaurant_table && (Date.now() - createdAt > 20 * 60 * 1000)) {
-    // If settled long ago without table, may be completed
-    orderStatus = 'Completed';
   } else if (bill.type === 'sale') {
-    // A fresh sale bill has been created on the POS register
-    // It is in queue ('New') or 'In Kitchen' once KOT is dispatched
+    // A fresh sale bill on the register begins in 'New' queue
     orderStatus = existingOrder?.orderStatus || 'New';
   }
 
   // 5. KOT Number & KOT Print Confirmation Status
-  // RULE: Do not assume that the existence of a KOT number proves that it printed successfully!
-  // In Ewity restaurant locations, KOT numbers are assigned upon ticket generation (e.g. "KOT-104").
-  // Without verified printer hardware acknowledgement, KOT status is "Awaiting Confirmation"
-  // or "KOT Not Confirmed".
-  const kotNumber = bill.kot_number || `KOT-${bill.number.replace(/[^0-9]/g, '') || bill.id}`;
-  
-  let kotStatus: KOTStatus = existingOrder ? existingOrder.kotStatus : 'Awaiting Confirmation';
-  let kotConfirmedAt: number | undefined = existingOrder?.kotConfirmedAt;
+  // STRICT RULE: Never infer physical KOT printing from a KOT number alone!
+  // Never fabricate fallback KOT numbers like KOT-<bill_number>.
+  // Missing print evidence is represented as 'Awaiting Confirmation' or 'KOT Not Confirmed'.
+  const kotNumber = bill.kot_number ? bill.kot_number.trim() : '';
 
-  // If already confirmed by kitchen operator, preserve it
+  let kotStatus: KOTStatus = 'KOT Not Confirmed';
+  let kotConfirmedAt: number | undefined = undefined;
+
+  if (kotNumber) {
+    kotStatus = 'Awaiting Confirmation';
+  }
+
+  // Only mark 'Confirmed' when supported by reliable source evidence
+  // (e.g. verified kitchen operator acknowledgement preserved in existingOrder)
   if (existingOrder && existingOrder.kotStatus === 'Confirmed') {
     kotStatus = 'Confirmed';
     kotConfirmedAt = existingOrder.kotConfirmedAt;

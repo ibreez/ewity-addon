@@ -299,19 +299,16 @@ async function runAllTests() {
     )();
   });
 
-  // Test 11: Demo data is isolated and never leaks into live mode
-  await runTest('11. Demo data is isolated and never leaks into live mode', () => {
-    // In live mode, simulated fixtures are strictly filtered out
-    const mixedData = [
-      mapEwityBillToOrder(MOCK_EWITY_BILLS[0], undefined, undefined, 'simulated_fixture'),
-    ];
-    const liveFiltered = mixedData.filter((o) => o.dataSource !== 'simulated_fixture');
-    assert.strictEqual(liveFiltered.length, 0);
-
+  // Test 11: Production data provenance is strictly maintained
+  await runTest('11. Production data provenance is strictly maintained with authentic sources', () => {
     // Live mode order mapping preserves authentic provenance
     const liveOrder = mapEwityBillToOrder(MOCK_EWITY_BILLS[0], undefined, undefined, 'ewity_api');
     assert.strictEqual(liveOrder.dataSource, 'ewity_api');
     assert.ok(liveOrder.dataTimestamp! > 0);
+
+    const webhookOrder = mapEwityBillToOrder(MOCK_EWITY_BILLS[0], undefined, undefined, 'ewity_webhook');
+    assert.strictEqual(webhookOrder.dataSource, 'ewity_webhook');
+    assert.ok(webhookOrder.dataTimestamp! > 0);
   });
 
   // Test 12: Webhook signature verification and deduplication

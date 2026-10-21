@@ -26,7 +26,7 @@ import {
   ExternalLink,
   ShieldAlert,
 } from 'lucide-react';
-import { EwityConnectionInfo, MockTestResult, EwityBillSummary } from '../types/ewity';
+import { EwityConnectionInfo, EwityBillSummary } from '../types/ewity';
 
 interface EwityIntegrationViewProps {
   connectionInfo: EwityConnectionInfo | null;
@@ -43,62 +43,43 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
   onDisconnect,
   onReconcile,
 }) => {
-  const [activeTab, setActiveTab] = useState<'status' | 'tests' | 'appui' | 'bills' | 'webhooks'>('tests');
-  const [isTestingSuite, setIsTestingSuite] = useState<boolean>(false);
-  const [testResults, setTestResults] = useState<MockTestResult[]>([]);
-  const [testSuiteSummary, setTestSuiteSummary] = useState<{ total: number; passed: number; failed: number } | null>(null);
-  const [appUiSimulating, setAppUiSimulating] = useState<boolean>(false);
-  const [appUiSimulateResult, setAppUiSimulateResult] = useState<any>(null);
+  const [activeTab, setActiveTab] = useState<'status' | 'appui' | 'bills' | 'webhooks'>('status');
   const [copiedAppUrl, setCopiedAppUrl] = useState<boolean>(false);
 
   // Manual connect form state
   const [apiKeyInput, setApiKeyInput] = useState<string>('');
   const [storeIdInput, setStoreIdInput] = useState<string>('');
   const [webhookSecretInput, setWebhookSecretInput] = useState<string>('');
+  const [adminKeyInput, setAdminKeyInput] = useState<string>(() => {
+    try {
+      return sessionStorage.getItem('ewity_admin_key') || '';
+    } catch {
+      return '';
+    }
+  });
   const [connectLoading, setConnectLoading] = useState<boolean>(false);
   const [connectMessage, setConnectMessage] = useState<string | null>(null);
 
   // KOT filter & bills browser state
-  const [kotFilterInput, setKotFilterInput] = useState<string>('KOT-9901');
+  const [kotFilterInput, setKotFilterInput] = useState<string>('');
   const [fetchedBills, setFetchedBills] = useState<EwityBillSummary[]>([]);
   const [billsLoading, setBillsLoading] = useState<boolean>(false);
 
   // Webhooks inspector state
   const [recentWebhooks, setRecentWebhooks] = useState<any[]>([]);
-  const [simulatingWebhook, setSimulatingWebhook] = useState<boolean>(false);
 
-  // Run mock test suite
-  const handleRunTests = async () => {
-    setIsTestingSuite(true);
-    try {
-      const res = await fetch('/api/ewity/tests/run', { method: 'POST' });
-      const data = await res.json();
-      setTestResults(data.results || []);
-      setTestSuiteSummary({ total: data.total, passed: data.passed, failed: data.failed });
-    } catch (err: any) {
-      console.error('Failed to run mock test suite:', err);
-    } finally {
-      setIsTestingSuite(false);
+  const getAuthHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = {};
+    const sessionToken = sessionStorage.getItem('ewity_embed_session');
+    const adminKey = sessionStorage.getItem('ewity_admin_key');
+    if (sessionToken) {
+      headers['Authorization'] = `Bearer ${sessionToken}`;
+      headers['X-Ewity-Session'] = sessionToken;
+    } else if (adminKey) {
+      headers['Authorization'] = `Bearer ${adminKey}`;
+      headers['X-Admin-Key'] = adminKey;
     }
-  };
-
-  // Run test suite automatically on first mount
-  useEffect(() => {
-    handleRunTests();
-  }, []);
-
-  // Simulate authorized App UI request
-  const handleSimulateAppUi = async () => {
-    setAppUiSimulating(true);
-    try {
-      const res = await fetch('/api/ewity/app/simulate', { method: 'POST' });
-      const data = await res.json();
-      setAppUiSimulateResult(data);
-    } catch (err: any) {
-      console.error('Failed to simulate App UI request:', err);
-    } finally {
-      setAppUiSimulating(false);
-    }
+    return headers;
   };
 
   // Fetch bills with KOT filter
@@ -107,7 +88,9 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
     try {
       const query = new URLSearchParams();
       if (kotFilterInput) query.set('q_kot_number', kotFilterInput);
-      const res = await fetch(`/api/ewity/bills?${query.toString()}`);
+      const res = await fetch(`/api/ewity/bills?${query.toString()}`, {
+        headers: getAuthHeaders(),
+      });
       const data = await res.json();
       setFetchedBills(data.data || []);
     } catch (err) {
@@ -120,7 +103,9 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
   // Fetch recent webhooks
   const handleFetchWebhooks = async () => {
     try {
-      const res = await fetch('/api/ewity/webhooks/recent');
+      const res = await fetch('/api/ewity/webhooks/recent', {
+        headers: getAuthHeaders(),
+      });
       const data = await res.json();
       setRecentWebhooks(data.events || []);
     } catch (err) {
@@ -169,13 +154,11 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                     className={`px-2.5 py-0.5 rounded text-xs font-bold border ${
                       status === 'LIVE CONNECTED'
                         ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                        : status === 'DEMO MODE'
-                        ? 'bg-amber-100 text-amber-900 border-amber-300'
                         : status === 'Connecting'
                         ? 'bg-blue-50 text-blue-800 border-blue-300'
                         : status === 'LIVE DATA STALE'
                         ? 'bg-amber-50 text-amber-800 border-amber-300'
-                        : status === 'CONNECTION ERROR' || status === 'PERMISSION ERROR'
+                        : status === 'CONNECTION ERROR' || status === 'PERMISSION ERROR' || status === 'AUTHENTICATION FAILED'
                         ? 'bg-red-50 text-red-800 border-red-300'
                         : 'bg-slate-100 text-slate-700 border-slate-300'
                     }`}
@@ -193,7 +176,7 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
           <div className="flex items-center gap-2">
             <button
               onClick={onRefreshStatus}
-              className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg border border-slate-200 text-xs font-medium flex items-center gap-1.5"
+              className="p-2 text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg border border-slate-200 text-xs font-medium flex items-center gap-1.5 cursor-pointer"
               title="Refresh connection status"
             >
               <RotateCw className="w-3.5 h-3.5" />
@@ -203,14 +186,14 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
             {status === 'LIVE CONNECTED' || status === 'LIVE DATA STALE' ? (
               <button
                 onClick={onDisconnect}
-                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-semibold border border-slate-300"
+                className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-semibold border border-slate-300 cursor-pointer"
               >
-                Disconnect & Return to Demo
+                Disconnect Gateway
               </button>
             ) : (
               <button
                 onClick={() => setActiveTab('status')}
-                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs"
+                className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs cursor-pointer"
               >
                 Configure Credentials
               </button>
@@ -237,25 +220,20 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
       {/* Navigation Tabs */}
       <div className="flex items-center gap-1 border-b border-slate-200 text-xs font-medium">
         <button
-          onClick={() => setActiveTab('tests')}
-          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 ${
-            activeTab === 'tests'
+          onClick={() => setActiveTab('status')}
+          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 cursor-pointer ${
+            activeTab === 'status'
               ? 'border-slate-900 text-slate-900'
               : 'border-transparent text-slate-500 hover:text-slate-800'
           }`}
         >
-          <ShieldCheck className="w-4 h-4" />
-          <span>Mocked API Test Suite ({testSuiteSummary?.total || 13} Tests)</span>
-          {testSuiteSummary && (
-            <span className="px-1.5 py-0.2 bg-emerald-100 text-emerald-800 text-[10px] rounded font-bold font-mono">
-              {testSuiteSummary.passed}/{testSuiteSummary.total}
-            </span>
-          )}
+          <Key className="w-4 h-4" />
+          <span>Authentication & Credentials</span>
         </button>
 
         <button
           onClick={() => setActiveTab('appui')}
-          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 ${
+          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 cursor-pointer ${
             activeTab === 'appui'
               ? 'border-slate-900 text-slate-900'
               : 'border-transparent text-slate-500 hover:text-slate-800'
@@ -269,23 +247,11 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
         </button>
 
         <button
-          onClick={() => setActiveTab('status')}
-          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 ${
-            activeTab === 'status'
-              ? 'border-slate-900 text-slate-900'
-              : 'border-transparent text-slate-500 hover:text-slate-800'
-          }`}
-        >
-          <Key className="w-4 h-4" />
-          <span>Authentication & Credentials</span>
-        </button>
-
-        <button
           onClick={() => {
             setActiveTab('bills');
             handleFetchBills();
           }}
-          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 ${
+          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 cursor-pointer ${
             activeTab === 'bills'
               ? 'border-slate-900 text-slate-900'
               : 'border-transparent text-slate-500 hover:text-slate-800'
@@ -300,7 +266,7 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
             setActiveTab('webhooks');
             handleFetchWebhooks();
           }}
-          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 ${
+          className={`px-4 py-2.5 border-b-2 font-semibold transition-colors flex items-center gap-2 cursor-pointer ${
             activeTab === 'webhooks'
               ? 'border-slate-900 text-slate-900'
               : 'border-transparent text-slate-500 hover:text-slate-800'
@@ -310,83 +276,6 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
           <span>Webhooks & Reconciliation</span>
         </button>
       </div>
-
-      {/* TAB 1: Mocked API Test Suite */}
-      {activeTab === 'tests' && (
-        <div className="space-y-4">
-          <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex items-center justify-between">
-            <div>
-              <h3 className="text-sm font-bold text-slate-900">
-                Official Ewity Integration Test Suite
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Executes all 9 required edge cases verifying authentication, rate limits, pagination, and webhook deduplication.
-              </p>
-            </div>
-            <button
-              onClick={handleRunTests}
-              disabled={isTestingSuite}
-              className="px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
-            >
-              <Play className="w-3.5 h-3.5" />
-              <span>{isTestingSuite ? 'Executing Tests...' : 'Run All 9 Tests'}</span>
-            </button>
-          </div>
-
-          <div className="grid grid-cols-1 gap-3">
-            {testResults.map((test) => (
-              <div
-                key={test.id}
-                className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2 text-xs"
-              >
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2.5">
-                    {test.passed ? (
-                      <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    ) : (
-                      <XCircle className="w-4 h-4 text-red-600 shrink-0" />
-                    )}
-                    <span className="font-bold text-slate-900">{test.name}</span>
-                    <span className="px-2 py-0.5 bg-slate-100 text-slate-600 rounded text-[10px] font-mono uppercase">
-                      {test.category}
-                    </span>
-                  </div>
-
-                  <div className="flex items-center gap-2">
-                    {test.statusCode && (
-                      <span className="font-mono text-[11px] font-bold px-2 py-0.5 bg-slate-100 rounded text-slate-800">
-                        HTTP {test.statusCode}
-                      </span>
-                    )}
-                    <span className="font-mono text-[11px] text-slate-500 tabular-nums">
-                      {test.durationMs}ms
-                    </span>
-                    <span className="px-2 py-0.5 rounded font-bold text-[10px] bg-emerald-100 text-emerald-800">
-                      PASSED
-                    </span>
-                  </div>
-                </div>
-
-                <p className="text-slate-600 pl-6 text-[11px] leading-relaxed">
-                  {test.description}
-                </p>
-
-                <div className="ml-6 p-2.5 bg-slate-50 rounded-lg border border-slate-100 font-mono text-[11px] text-slate-700">
-                  <span className="text-slate-500 font-sans block mb-1 font-semibold text-[10px] uppercase">
-                    Audit Result:
-                  </span>
-                  {test.details}
-                  {test.error && (
-                    <span className="text-red-700 block mt-1">
-                      Expected error handled: {test.error}
-                    </span>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
 
       {/* TAB: Ewity App UI Integration */}
       {activeTab === 'appui' && (
@@ -412,14 +301,15 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
               </div>
 
               <div className="flex items-center gap-2">
-                <button
-                  onClick={handleSimulateAppUi}
-                  disabled={appUiSimulating}
-                  className="px-4 py-2 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                <a
+                  href="/ewity/app"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="px-3.5 py-1.5 bg-purple-700 hover:bg-purple-800 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center gap-1.5 transition-colors"
                 >
-                  <Play className="w-3.5 h-3.5" />
-                  <span>{appUiSimulating ? 'Validating...' : 'Simulate Signed App UI Request'}</span>
-                </button>
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>Open /ewity/app</span>
+                </a>
               </div>
             </div>
 
@@ -431,30 +321,31 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                 </span>
                 <button
                   onClick={() => {
-                    navigator.clipboard.writeText('https://ais-pre-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app/ewity/app');
+                    const url = typeof window !== 'undefined' ? `${window.location.origin}/ewity/app` : '/ewity/app';
+                    navigator.clipboard.writeText(url);
                     setCopiedAppUrl(true);
                     setTimeout(() => setCopiedAppUrl(false), 2000);
                   }}
-                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] font-mono flex items-center gap-1.5 transition-colors"
+                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[11px] font-mono flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Copy className="w-3 h-3" />
                   <span>{copiedAppUrl ? 'Copied!' : 'Copy App UI URL'}</span>
                 </button>
               </div>
               <div className="p-2.5 bg-slate-950 rounded-lg font-mono text-xs text-emerald-400 break-all border border-slate-800">
-                https://ais-pre-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app/ewity/app
+                {typeof window !== 'undefined' ? `${window.location.origin}/ewity/app` : '/ewity/app'}
               </div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs pt-1 text-slate-300">
                 <div>
-                  <span className="text-slate-400">Embedded Iframe URL:</span>
+                  <span className="text-slate-400">Embedded App Root:</span>
                   <div className="font-mono text-[11px] text-slate-200 mt-0.5 truncate">
-                    https://ais-pre-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app
+                    {typeof window !== 'undefined' ? window.location.origin : ''}
                   </div>
                 </div>
                 <div>
                   <span className="text-slate-400">Target Component:</span>
                   <div className="font-mono text-[11px] text-slate-200 mt-0.5">
-                    type: "IframeView" | height: 900px
+                    type: &quot;IframeView&quot; | height: 900px
                   </div>
                 </div>
               </div>
@@ -493,46 +384,6 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
               </div>
             </div>
           </div>
-
-          {/* Interactive Simulation Result */}
-          {appUiSimulateResult && (
-            <div className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs space-y-3">
-              <div className="flex items-center justify-between">
-                <h4 className="text-xs font-bold text-slate-900 uppercase tracking-wider flex items-center gap-2">
-                  <Terminal className="w-4 h-4 text-slate-700" />
-                  <span>Live App UI Verification & Response Output</span>
-                </h4>
-                <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded font-mono text-[11px] font-bold">
-                  HTTP 200 OK
-                </span>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                <div className="space-y-1.5">
-                  <span className="font-semibold text-slate-700">Simulated Request Headers:</span>
-                  <pre className="p-3 bg-slate-950 text-slate-200 rounded-lg font-mono text-[11px] overflow-x-auto border border-slate-800">
-                    {JSON.stringify(appUiSimulateResult.request?.headers, null, 2)}
-                  </pre>
-                </div>
-
-                <div className="space-y-1.5">
-                  <span className="font-semibold text-slate-700">Returned App UI JSON Document:</span>
-                  <pre className="p-3 bg-slate-950 text-emerald-400 rounded-lg font-mono text-[11px] overflow-x-auto border border-slate-800">
-                    {JSON.stringify(appUiSimulateResult.response, null, 2)}
-                  </pre>
-                </div>
-              </div>
-
-              <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg text-xs text-purple-900 flex items-center justify-between">
-                <span>
-                  <strong>Authenticated Merchant:</strong> Store ID <code className="font-mono">{appUiSimulateResult.auth?.merchantIdentity?.storeId || 'N/A'}</code> ({appUiSimulateResult.auth?.merchantIdentity?.companyName || 'Ewity POS'})
-                </span>
-                <span className="text-[11px] text-purple-700 font-mono">
-                  Iframe: embedded=1
-                </span>
-              </div>
-            </div>
-          )}
         </div>
       )}
 
@@ -588,6 +439,25 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                   placeholder="whsec_... (Webhooks tab in portal)"
                   value={webhookSecretInput}
                   onChange={(e) => setWebhookSecretInput(e.target.value)}
+                  className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs focus:outline-none focus:ring-1 focus:ring-slate-400"
+                />
+              </div>
+
+              <div>
+                <div className="flex justify-between items-center mb-1">
+                  <label className="font-semibold text-slate-700">
+                    Administrator API Key (ADMIN_API_KEY)
+                  </label>
+                  <span className="text-[10px] text-slate-500">For managing connection & triggers</span>
+                </div>
+                <input
+                  type="password"
+                  placeholder="Administrator key for management endpoints..."
+                  value={adminKeyInput}
+                  onChange={(e) => {
+                    setAdminKeyInput(e.target.value);
+                    sessionStorage.setItem('ewity_admin_key', e.target.value);
+                  }}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs focus:outline-none focus:ring-1 focus:ring-slate-400"
                 />
               </div>

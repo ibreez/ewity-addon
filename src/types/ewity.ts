@@ -120,7 +120,6 @@ export interface EwityWebhookEnvelope<T = any> {
 
 export type EwityConnectionStatus = 
   | 'LIVE CONNECTED'
-  | 'DEMO MODE'
   | 'NOT CONFIGURED'
   | 'NOT CONNECTED'
   | 'AUTHENTICATION FAILED'
@@ -145,7 +144,7 @@ export interface TestConnectionResult {
 }
 
 export interface EwityConnectionInfo {
-  mode: 'demo' | 'live';
+  mode?: 'live';
   status: EwityConnectionStatus;
   isConnected: boolean;
   storeId: string | null;

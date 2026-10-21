@@ -5,6 +5,7 @@
 
 import crypto from 'crypto';
 import { EwityWebhookEnvelope } from '../types/ewity';
+import { DurableStore } from './durableStore';
 
 export interface WebhookVerificationResult {
   isValid: boolean;
@@ -27,14 +28,20 @@ export interface ProcessedWebhookRecord {
 
 export class EwityWebhookService {
   private signingSecret: string;
+  private durableStore?: DurableStore;
   private processedDeliveries = new Map<string, ProcessedWebhookRecord>();
   private entityTimestamps = new Map<string, number>();
   private recentEvents: (EwityWebhookEnvelope & { deliveryId: string; verified: boolean; status: string })[] = [];
   private lastWebhookReceivedAt: number | null = null;
   private lastWebhookEvent: string | null = null;
 
-  constructor(signingSecret: string = '') {
+  constructor(signingSecret: string = '', durableStore?: DurableStore) {
     this.signingSecret = signingSecret;
+    this.durableStore = durableStore;
+  }
+
+  public setDurableStore(store: DurableStore) {
+    this.durableStore = store;
   }
 
   public setSigningSecret(secret: string) {
@@ -149,8 +156,9 @@ export class EwityWebhookService {
     const now = Date.now();
     const effectiveDeliveryId = deliveryId || envelope.id || `unknown_${now}`;
 
-    // 1. Delivery Deduplication Check
-    if (this.processedDeliveries.has(effectiveDeliveryId)) {
+    // 1. Delivery Deduplication Check (in-memory + durable storage)
+    const existingDurable = this.durableStore?.getDelivery(effectiveDeliveryId);
+    if (this.processedDeliveries.has(effectiveDeliveryId) || existingDurable?.status === 'processed') {
       console.log(`[EWITY-WEBHOOK] Deduplicated delivery: ${effectiveDeliveryId}`);
       return {
         success: true,
@@ -159,6 +167,17 @@ export class EwityWebhookService {
         action: 'duplicate_ignored',
         message: `Delivery ${effectiveDeliveryId} already processed (idempotent 200 OK).`,
       };
+    }
+
+    // Record incoming delivery durably before processing
+    if (this.durableStore) {
+      this.durableStore.recordDeliveryReceived(
+        effectiveDeliveryId,
+        envelope.id || effectiveDeliveryId,
+        envelope.event,
+        envelope.install?.store_id,
+        envelope.data?.id
+      );
     }
 
     // 2. Out-of-Order Check based on event created_at
@@ -184,6 +203,9 @@ export class EwityWebhookService {
           status: 'stale_skipped',
         };
         this.processedDeliveries.set(effectiveDeliveryId, record);
+        if (this.durableStore) {
+          this.durableStore.updateDeliveryStatus(effectiveDeliveryId, 'stale_skipped');
+        }
 
         return {
           success: true,
@@ -209,6 +231,9 @@ export class EwityWebhookService {
       status: 'processed',
     };
     this.processedDeliveries.set(effectiveDeliveryId, record);
+    if (this.durableStore) {
+      this.durableStore.updateDeliveryStatus(effectiveDeliveryId, 'processed');
+    }
 
     // Keep memory bounded
     if (this.processedDeliveries.size > 2000) {
@@ -255,5 +280,48 @@ export class EwityWebhookService {
 
   public getProcessedCount(): number {
     return this.processedDeliveries.size;
+  }
+
+  /**
+   * Helper method to generate HMAC-SHA256 signature for testing and verification.
+   */
+  public generateSignature(secret: string, timestamp: number, payload: string): string {
+    return crypto
+      .createHmac('sha256', secret || this.signingSecret)
+      .update(`${timestamp}.${payload}`)
+      .digest('hex');
+  }
+
+  /**
+   * Helper method to verify signature and process delivery in a single step.
+   */
+  public verifyAndProcess(
+    headers: Record<string, string | undefined>,
+    rawBody: string | Buffer
+  ): {
+    isValid: boolean;
+    duplicate: boolean;
+    reason?: string;
+    action?: string;
+  } {
+    const sigHeader = headers['x-ewity-signature'] || headers['X-Ewity-Signature'];
+    const verifyResult = this.verifySignature(sigHeader, rawBody);
+    if (!verifyResult.isValid) {
+      return { isValid: false, duplicate: false, reason: verifyResult.reason };
+    }
+
+    try {
+      const bodyStr = typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8');
+      const envelope = JSON.parse(bodyStr);
+      const deliveryId = envelope.id || `delivery_${Date.now()}`;
+      const processResult = this.processEnvelope(deliveryId, envelope);
+      return {
+        isValid: true,
+        duplicate: processResult.wasDuplicate,
+        action: processResult.action,
+      };
+    } catch (err: any) {
+      return { isValid: false, duplicate: false, reason: err.message };
+    }
   }
 }

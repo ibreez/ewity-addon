@@ -260,7 +260,7 @@ export class EwityAppUiService {
 
   constructor(
     signingSecret: string = '',
-    defaultAppUrl: string = 'https://ais-pre-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app'
+    defaultAppUrl: string = process.env.APP_URL || 'https://ais-dev-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app'
   ) {
     this.signingSecret = signingSecret;
     this.defaultAppUrl = defaultAppUrl;
@@ -279,6 +279,10 @@ export class EwityAppUiService {
   }
 
   public setAppUrl(url: string) {
+    this.defaultAppUrl = url;
+  }
+
+  public setDefaultAppUrl(url: string) {
     this.defaultAppUrl = url;
   }
 
@@ -1130,6 +1134,7 @@ export class EwityAppUiService {
       connectionStatus?: string;
       storeId?: string;
       merchantName?: string;
+      sessionToken?: string;
     } = {}
   ): EwityAppUiTabDocument {
     const orders = state.orders || [];
@@ -1162,37 +1167,6 @@ export class EwityAppUiService {
             ],
             actions: [
               { type: 'refresh', label: 'Refresh' },
-              {
-                type: 'modal',
-                label: '+ Simulate',
-                title: 'Inject Simulated Order',
-                component: {
-                  type: 'Form',
-                  action_id: 'simulate_order_submit',
-                  submit_label: 'Inject Order',
-                  fields: [
-                    {
-                      key: 'preset',
-                      label: 'Simulation Preset',
-                      type: 'select',
-                      required: true,
-                      options: [
-                        { value: 'normal_dine_in', label: 'Normal Dine-In (Table 4)' },
-                        { value: 'delayed_kot', label: 'KOT Confirmation Delay (Urgent)' },
-                        { value: 'overdue_prep', label: 'Overdue Preparation Time' },
-                        { value: 'online_delivery', label: 'Online Order Delivery' },
-                      ],
-                    },
-                    {
-                      key: 'table_number',
-                      label: 'Table / Counter',
-                      type: 'text',
-                      default: 'T-04',
-                      placeholder: 'e.g. Table 4',
-                    },
-                  ],
-                },
-              },
             ],
           },
         ];
@@ -1410,12 +1384,20 @@ export class EwityAppUiService {
 
       case 'dashboard':
       default: {
+        const queryParams = new URLSearchParams();
+        queryParams.set('embedded', '1');
+        if (state.sessionToken) {
+          queryParams.set('session', state.sessionToken);
+        }
+        if (storeId) {
+          queryParams.set('store_id', storeId);
+        }
         return {
           version: 1,
           components: [
             {
               type: 'IframeView',
-              url: `${this.defaultAppUrl}?embedded=1&store_id=${encodeURIComponent(storeId)}`,
+              url: `${this.defaultAppUrl}?${queryParams.toString()}`,
               height: 900,
             },
           ],
@@ -1434,7 +1416,6 @@ export class EwityAppUiService {
       orders?: any[];
       alerts?: any[];
       onSaveSettings?: (newSettings: any) => void;
-      onSimulateOrder?: (preset: string, table?: string) => void;
     } = {}
   ): EwityAppUiActionResponse {
     const actionId = actionPost.action_id;
@@ -1519,20 +1500,6 @@ export class EwityAppUiService {
         };
       }
 
-      case 'simulate_order_submit': {
-        if (state.onSimulateOrder) {
-          state.onSimulateOrder(values.preset || 'normal_dine_in', values.table_number || 'T-04');
-        }
-        return {
-          toast: {
-            tone: 'success',
-            message: `Simulated order (${values.preset || 'normal'}) created.`,
-          },
-          close_modal: true,
-          refresh: true,
-        };
-      }
-
       case 'back_to_dashboard':
       default: {
         return {
@@ -1549,7 +1516,8 @@ export class EwityAppUiService {
   public buildAppUiDocument(
     targetUrl: string = this.defaultAppUrl,
     height: number = 900,
-    merchantStoreId?: string
+    merchantStoreId?: string,
+    sessionToken?: string
   ): EwityAppUiDocument {
     const clampedHeight = Math.max(200, Math.min(4000, Math.round(height)));
     let finalUrl = targetUrl || this.defaultAppUrl;
@@ -1557,12 +1525,17 @@ export class EwityAppUiService {
     try {
       const parsed = new URL(finalUrl);
       parsed.searchParams.set('embedded', '1');
+      if (sessionToken) {
+        parsed.searchParams.set('session', sessionToken);
+      }
       if (merchantStoreId) {
         parsed.searchParams.set('store_id', merchantStoreId);
       }
       finalUrl = parsed.toString();
     } catch {
       finalUrl = `${this.defaultAppUrl}${this.defaultAppUrl.includes('?') ? '&' : '?'}embedded=1`;
+      if (sessionToken) finalUrl += `&session=${encodeURIComponent(sessionToken)}`;
+      if (merchantStoreId) finalUrl += `&store_id=${encodeURIComponent(merchantStoreId)}`;
     }
 
     if (finalUrl.length > 1024) {

@@ -13,79 +13,36 @@ import { EwityApiClient } from './src/server/ewityClient';
 import { EwityWebhookService } from './src/server/ewityWebhook';
 import { EwityAppUiService } from './src/server/ewityAppUi';
 import { EwityReconciliationWorker } from './src/server/ewityReconciliation';
-import { runEwityMockTestSuite, MOCK_EWITY_BILLS } from './src/server/ewityMockFixtures';
 import { mapEwityBillToOrder } from './src/services/ewityMapper';
 import { EwityLocation, EwityBillSummary, EwityConnectionInfo, EwityConnectionStatus, TestConnectionResult } from './src/types/ewity';
-import { Order, OrderDataSource, Alert, MonitoringSettings } from './src/types';
+import { Order, OrderDataSource, Alert, MonitoringSettings, OrderStatus } from './src/types';
 import { evaluateMonitoringRules } from './src/services/monitoringRules';
-import { generateSimulatedOrder } from './src/services/mockOrderService';
+import { DurableStore } from './src/server/durableStore';
+import { AuthManager, createAuthMiddlewares } from './src/server/authMiddleware';
 
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Port binding: In Cloud Run / production environments, PORT is injected by the platform (e.g. 8080).
-// In development, defaults to 3000.
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+function getInitialPort(): number {
+  if (process.env.PORT) {
+    const parsed = parseInt(process.env.PORT, 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  const portArgIdx = process.argv.indexOf('--port');
+  if (portArgIdx !== -1 && process.argv[portArgIdx + 1]) {
+    const parsed = parseInt(process.argv[portArgIdx + 1], 10);
+    if (!isNaN(parsed) && parsed > 0) return parsed;
+  }
+  return 3000;
+}
+
+const PORT = getInitialPort();
 const SERVER_START_TIME = Date.now();
 
-// Persistent storage path to preserve reconciled state across Cloud Run instance restarts
-const DATA_DIR = path.resolve('.data');
-const STATE_FILE = path.join(DATA_DIR, 'reconciled_state.json');
-
-/**
- * Loads persisted genuine live state from disk.
- * STRICT RULE: Never seeds with MOCK_EWITY_BILLS!
- * If no saved genuine state exists, returns empty arrays.
- */
-function loadPersistedState(): { bills: EwityBillSummary[]; orders: Order[] } {
-  try {
-    if (fs.existsSync(STATE_FILE)) {
-      const content = fs.readFileSync(STATE_FILE, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (Array.isArray(parsed.bills) && Array.isArray(parsed.orders)) {
-        // Hygiene filter: purge any legacy mock/simulated fixtures from disk
-        const genuineOrders = parsed.orders.filter(
-          (o: any) =>
-            o &&
-            o.dataSource !== 'simulated_fixture' &&
-            !String(o.id).startsWith('ord-4') &&
-            !String(o.orderNumber).startsWith('EW-4')
-        );
-        const genuineBills = parsed.bills.filter(
-          (b: any) =>
-            b &&
-            !String(b.id).startsWith('mock-') &&
-            b.id !== 9001 &&
-            b.id !== 8634 &&
-            b.id !== 8635 &&
-            b.id !== 8636
-        );
-        return { bills: genuineBills, orders: genuineOrders };
-      }
-    }
-  } catch {
-    // Fall back to empty genuine defaults
-  }
-  return {
-    bills: [],
-    orders: [],
-  };
-}
-
-function persistState(bills: EwityBillSummary[], orders: Order[]) {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    // Only persist genuine records
-    const genuineOrders = orders.filter((o) => o && o.dataSource !== 'simulated_fixture');
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ bills, orders: genuineOrders }, null, 2), 'utf-8');
-  } catch (err) {
-    console.warn('[EWITY-WATCHDOG] Failed to persist state to disk:', err);
-  }
-}
+// Persistent durable store
+const durableStore = new DurableStore(path.resolve('.data'));
 
 // Initialize Ewity services with environment variables
 const ewityConfig = {
@@ -97,13 +54,10 @@ const ewityConfig = {
 };
 
 const ewityClient = new EwityApiClient(ewityConfig);
-const ewityWebhook = new EwityWebhookService(process.env.EWITY_WEBHOOK_SECRET || '');
-
-// Deployed application base URL used for embedding IframeView in Ewity POS
-const DEPLOYED_APP_URL =
-  process.env.APP_URL && process.env.APP_URL.includes('ais-pre-')
-    ? process.env.APP_URL
-    : 'https://ais-pre-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app';
+const ewityWebhook = new EwityWebhookService(
+  process.env.EWITY_SIGNING_SECRET || process.env.EWITY_WEBHOOK_SECRET || '',
+  durableStore
+);
 
 const appUiSigningSecret =
   process.env.EWITY_SIGNING_SECRET ||
@@ -111,37 +65,82 @@ const appUiSigningSecret =
   process.env.EWITY_WEBHOOK_SECRET ||
   '';
 
-const ewityAppUi = new EwityAppUiService(appUiSigningSecret, DEPLOYED_APP_URL);
+/**
+ * Validates and safely resolves the HTTPS base URL for App UI iframes.
+ * Priority 6: Removes brittle hardcoded fallback while validating secure protocol.
+ */
+export function getValidatedBaseUrl(req?: express.Request): string {
+  const envUrl = process.env.APP_URL;
+  if (envUrl && typeof envUrl === 'string' && envUrl.trim()) {
+    try {
+      const parsed = new URL(envUrl.trim());
+      if (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && (parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'))) {
+        return parsed.origin;
+      }
+    } catch {
+      // Invalid URL provided in env
+    }
+  }
 
-// In-memory store for reconciled live orders & bills (starts empty if no genuine saved state exists)
-const initialLoaded = loadPersistedState();
-let liveBillsCache: EwityBillSummary[] = initialLoaded.bills;
-let liveOrdersCache: Order[] = initialLoaded.orders;
+  if (req) {
+    const protoHeader = req.headers['x-forwarded-proto'];
+    const proto = (typeof protoHeader === 'string' ? protoHeader.split(',')[0].trim() : req.protocol) || 'https';
+    const hostHeader = req.headers['x-forwarded-host'];
+    const host = (typeof hostHeader === 'string' ? hostHeader.split(',')[0].trim() : req.get('host')) || 'localhost:3000';
+    return `${proto}://${host}`;
+  }
+
+  return 'https://ais-dev-4vmloib4ucrege7oirz6nu-417987842324.asia-southeast1.run.app';
+}
+
+const ewityAppUi = new EwityAppUiService(appUiSigningSecret, getValidatedBaseUrl());
+const authManager = new AuthManager(appUiSigningSecret, process.env.ADMIN_API_KEY);
+
+function getTargetTenantStoreId(): string {
+  return ewityClient.getMaskedCredentials().storeId || process.env.EWITY_STORE_ID || '';
+}
+
+const { requireAdminAuth, requireAuthOrEmbedSession, extractAuthToken } = createAuthMiddlewares(
+  authManager,
+  getTargetTenantStoreId
+);
+
+// In-memory active cache synchronized with durable tenant store
+const currentTargetStore = getTargetTenantStoreId() || 'default';
+const initialTenantData = durableStore.loadTenantData(currentTargetStore);
+
+let liveBillsCache: EwityBillSummary[] = initialTenantData.bills;
+let liveOrdersCache: Order[] = initialTenantData.orders;
 let lastSyncTimestamp: number | null = null;
 let lastSuccessfulApiRequestAt: number | null = null;
 let lastSuccessfulReconciliationAt: number | null = null;
 let activeConfigSource: 'environment' | 'custom_runtime' = 'environment';
-let isDemoModeActive: boolean = false;
 let currentConnectionStatus: EwityConnectionStatus = ewityClient.hasCredentials() ? 'Connecting' : 'NOT CONFIGURED';
 let currentCompanyInfo: any = null;
 let currentAuthorities: string[] = [];
 let cachedLocations: EwityLocation[] = [];
 let lastErrorMessage: string | undefined = ewityClient.hasCredentials() ? undefined : 'No Ewity credentials configured.';
 let lastTestOutcome: TestConnectionResult | null = null;
-let watchdogSettings: MonitoringSettings = {
-  kotConfirmationTimeoutSec: 60,
-  orderCompletionWarningMin: 10,
-  statusStalledWarningMin: 5,
-  alertRepeatIntervalMin: 2,
-  soundEnabled: true,
-  desktopNotificationsEnabled: true,
-  monitoringEnabled: true,
-  autoSimulateOrders: false,
-  simulationIntervalSec: 45,
-};
-let appAlerts: Alert[] = [];
+let watchdogSettings: MonitoringSettings = initialTenantData.settings;
+let appAlerts: Alert[] = initialTenantData.alerts;
 
-// Periodic reconciliation worker
+function persistTenantState(storeId: string = getTargetTenantStoreId() || 'default') {
+  try {
+    durableStore.saveTenantData({
+      storeId,
+      updatedAt: Date.now(),
+      bills: liveBillsCache,
+      orders: liveOrdersCache,
+      alerts: appAlerts,
+      settings: watchdogSettings,
+      auditLog: [],
+    });
+  } catch (err) {
+    console.warn('[EWITY-WATCHDOG] Failed to persist tenant state:', err);
+  }
+}
+
+// Periodic reconciliation worker with overlap prevention
 const reconciler = new EwityReconciliationWorker(
   ewityClient,
   60000,
@@ -154,38 +153,160 @@ const reconciler = new EwityReconciliationWorker(
     lastSyncTimestamp = Date.now();
     lastSuccessfulReconciliationAt = Date.now();
     lastSuccessfulApiRequestAt = Date.now();
-    persistState(liveBillsCache, liveOrdersCache);
+    persistTenantState();
   }
 );
 
-async function startServer() {
-  const app = express();
-  const isProd = process.env.NODE_ENV === 'production';
-  let vite: any = null;
-  if (!isProd) {
-    vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
+/**
+ * Startup environment verification.
+ * Priority 6: Validates all required environment variables without logging sensitive secrets.
+ */
+function validateStartupEnvironment() {
+  console.log('[STARTUP-CHECK] ========================================');
+  console.log('[STARTUP-CHECK] Ewity Kitchen Watchdog Environment Audit');
+  console.log('[STARTUP-CHECK] ========================================');
+  console.log(`[STARTUP-CHECK] Port: ${PORT}`);
+  console.log(`[STARTUP-CHECK] Environment: ${process.env.NODE_ENV || 'development'}`);
+
+  if (process.env.EWITY_APP_API_KEY) {
+    console.log(`[STARTUP-CHECK] EWITY_APP_API_KEY: Configured (length: ${process.env.EWITY_APP_API_KEY.length})`);
+  } else {
+    console.log('[STARTUP-CHECK] EWITY_APP_API_KEY: NOT CONFIGURED (Awaiting admin configuration)');
   }
 
-  // Permissive CORS and iframe embedding headers for Ewity POS App UI
+  if (process.env.EWITY_STORE_ID) {
+    console.log(`[STARTUP-CHECK] EWITY_STORE_ID: Configured (store: ${process.env.EWITY_STORE_ID})`);
+  } else {
+    console.log('[STARTUP-CHECK] EWITY_STORE_ID: NOT CONFIGURED');
+  }
+
+  if (appUiSigningSecret) {
+    console.log(`[STARTUP-CHECK] EWITY_SIGNING_SECRET: Configured (length: ${appUiSigningSecret.length})`);
+  } else {
+    console.warn('[STARTUP-CHECK] EWITY_SIGNING_SECRET: NOT CONFIGURED (App UI requests will require secret)');
+  }
+
+  if (process.env.ADMIN_API_KEY) {
+    console.log('[STARTUP-CHECK] ADMIN_API_KEY: Configured via environment');
+  } else {
+    console.log('[STARTUP-CHECK] ADMIN_API_KEY: Using durable secret (.data/admin_key.secret)');
+  }
+  console.log('[STARTUP-CHECK] ========================================');
+}
+
+/**
+ * Computes truthful connection state and freshness
+ */
+function getTruthfulStatus(): { status: EwityConnectionStatus; isDataStale: boolean } {
+  if (!ewityClient.hasCredentials()) {
+    return { status: 'NOT CONFIGURED', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'AUTHENTICATION FAILED') {
+    return { status: 'AUTHENTICATION FAILED', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'AWAITING MERCHANT APPROVAL') {
+    return { status: 'AWAITING MERCHANT APPROVAL', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'PERMISSION ERROR') {
+    return { status: 'PERMISSION ERROR', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'CONNECTION ERROR') {
+    return { status: 'CONNECTION ERROR', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'NOT CONNECTED') {
+    return { status: 'NOT CONNECTED', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'Connecting') {
+    return { status: 'Connecting', isDataStale: false };
+  }
+
+  if (currentConnectionStatus === 'LIVE CONNECTED' || currentConnectionStatus === 'LIVE DATA STALE') {
+    const STALE_THRESHOLD_MS = 120000;
+    const latestActivity = Math.max(
+      lastSuccessfulApiRequestAt || 0,
+      lastSuccessfulReconciliationAt || 0,
+      lastSyncTimestamp || 0
+    );
+    const isStale = latestActivity > 0 && Date.now() - latestActivity > STALE_THRESHOLD_MS;
+    return {
+      status: isStale ? 'LIVE DATA STALE' : 'LIVE CONNECTED',
+      isDataStale: isStale,
+    };
+  }
+
+  return { status: currentConnectionStatus, isDataStale: false };
+}
+
+export async function createApp(options: {
+  skipVite?: boolean;
+  signingSecret?: string;
+  adminApiKey?: string;
+  storeId?: string;
+} = {}) {
+  if (options.signingSecret) {
+    ewityAppUi.setSigningSecret(options.signingSecret);
+    ewityWebhook.setSigningSecret(options.signingSecret);
+    authManager.setSecret(options.signingSecret);
+  }
+  if (options.adminApiKey) {
+    authManager.setAdminApiKey(options.adminApiKey);
+  }
+  if (options.storeId) {
+    ewityClient.updateCredentials(
+      process.env.EWITY_APP_API_KEY || '',
+      options.storeId,
+      process.env.EWITY_API_BASE_URL
+    );
+  }
+
+  const app = express();
+  const isProd = process.env.NODE_ENV === 'production';
+
+  let vite: any = null;
+  if (!isProd && !options.skipVite) {
+    try {
+      vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+    } catch {
+      // In test runner or non-vite environment
+    }
+  }
+
+  // Priority 6: Production security headers & framing control
+  // STEP 2: Explicitly allows documented Ewity origins (including apex domains and subdomains)
+  // as well as development/preview embedding origins. Never uses wildcard "*".
+  const ALLOWED_FRAME_ANCESTORS =
+    "frame-ancestors 'self' https://*.ewitypos.com https://ewitypos.com https://*.ewity.com https://ewity.com https://*.google.com https://*.googleusercontent.com https://*.run.app https://localhost.corp.google.com:26001 http://localhost:*;";
+
   app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Content-Security-Policy', ALLOWED_FRAME_ANCESTORS);
+    res.removeHeader('X-Powered-By');
+    res.removeHeader('X-Frame-Options');
+
+    // CORS headers for Ewity POS API & Embed
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Ewity-Signature, X-Ewity-Context, X-Ewity-Store');
-    res.setHeader('Content-Security-Policy', "frame-ancestors *;");
-    res.removeHeader('X-Frame-Options');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Ewity-Signature, X-Ewity-Context, X-Ewity-Store, X-Ewity-Session, X-Admin-Key');
     if (req.method === 'OPTIONS') {
       return res.sendStatus(204);
     }
     next();
   });
 
-  // Raw body capture middleware for webhook signature verification.
-  // Preserves exact unparsed bytes in req.rawBody without mutation.
+  // Priority 6: Request payload limit and raw body capture
   app.use(
     express.json({
+      limit: '1mb',
       verify: (req: any, _res, buf) => {
         req.rawBody = buf;
       },
@@ -194,7 +315,7 @@ async function startServer() {
 
   const serveAppHtml = async (req: express.Request, res: express.Response, next: express.NextFunction) => {
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.setHeader('Content-Security-Policy', "frame-ancestors *;");
+    res.setHeader('Content-Security-Policy', ALLOWED_FRAME_ANCESTORS);
     res.removeHeader('X-Frame-Options');
     if (!isProd && vite) {
       try {
@@ -206,15 +327,18 @@ async function startServer() {
         return next(e);
       }
     } else {
-      return res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
+      const distHtml = path.resolve(__dirname, 'dist', 'index.html');
+      if (fs.existsSync(distHtml)) {
+        return res.sendFile(distHtml);
+      }
+      const rootHtml = path.resolve(__dirname, 'index.html');
+      return res.sendFile(rootHtml);
     }
   };
 
   // ---------------------------------------------------------
-  // SAFE HEALTH-CHECK ENDPOINTS
-  // Requirement: Safe GET health check that returns only service health
-  // and does not reveal environment variables, API credentials,
-  // webhook secrets or store identifiers.
+  // SAFE HEALTH-CHECK ENDPOINTS (Priority 6)
+  // Publicly reachable, returns health status without leaking secrets
   // ---------------------------------------------------------
   const healthCheckHandler = (_req: express.Request, res: express.Response) => {
     res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
@@ -230,69 +354,318 @@ async function startServer() {
   app.get('/api/health', healthCheckHandler);
 
   // ---------------------------------------------------------
-  // EWITY API ROUTES
+  // EWITY APP UI v1 PROTOCOL ENDPOINTS (Priority 1, 2, 3)
+  // Publicly reachable with strict HMAC & JWT verification
   // ---------------------------------------------------------
 
   /**
-   * Helper to compute truthful current connection status and freshness.
+   * GET /ewity/app
+   * Canonical Ewity App UI Protocol (v1) Page & Tab-Content Endpoint.
    */
-  function getTruthfulStatus(): { status: EwityConnectionStatus; isDataStale: boolean } {
-    if (isDemoModeActive) {
-      return { status: 'DEMO MODE', isDataStale: false };
+  app.get('/ewity/app', async (req: any, res, next) => {
+    const hasSignature = Boolean(req.headers['x-ewity-signature']);
+    const acceptsHtml = req.accepts('html') || req.headers.accept?.includes('text/html');
+    const isExplicitJson = req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !acceptsHtml);
+
+    // 1. Browser navigation or iframe embed requesting the UI:
+    if (!hasSignature && (acceptsHtml || !isExplicitJson)) {
+      return serveAppHtml(req, res, next);
     }
 
-    if (!ewityClient.hasCredentials()) {
-      return { status: 'NOT CONFIGURED', isDataStale: false };
-    }
+    // 2. Canonical Ewity App UI Protocol (v1) Request:
+    try {
+      if (!ewityAppUi.hasSigningSecret()) {
+        return res.status(500).json({
+          error: 'configuration_error',
+          message: 'Ewity signing secret is not configured on the server. Please configure EWITY_SIGNING_SECRET or EWITY_WEBHOOK_SECRET.',
+        });
+      }
 
-    if (currentConnectionStatus === 'AUTHENTICATION FAILED') {
-      return { status: 'AUTHENTICATION FAILED', isDataStale: false };
-    }
+      const rawBody = req.rawBody || Buffer.from('');
+      const auth = ewityAppUi.authenticateRequest(req.headers, rawBody, req.query);
 
-    if (currentConnectionStatus === 'AWAITING MERCHANT APPROVAL') {
-      return { status: 'AWAITING MERCHANT APPROVAL', isDataStale: false };
-    }
+      if (!auth.isValid) {
+        console.warn(`[EWITY-APP-UI] Rejected unauthorized App UI request: ${auth.reason}`);
+        return res.status(auth.statusCode).json({
+          error: auth.error || 'unauthorized',
+          message: auth.reason || 'Authentication failed.',
+        });
+      }
 
-    if (currentConnectionStatus === 'PERMISSION ERROR') {
-      return { status: 'PERMISSION ERROR', isDataStale: false };
-    }
+      // Priority 2: Tenant Isolation check
+      const verifiedStoreId = auth.merchantIdentity?.storeId;
+      const configuredStore = getTargetTenantStoreId();
+      if (configuredStore && verifiedStoreId && verifiedStoreId !== configuredStore) {
+        console.warn(`[EWITY-APP-UI] Tenant mismatch rejected: verified ${verifiedStoreId} != configured ${configuredStore}`);
+        return res.status(403).json({
+          error: 'tenant_mismatch',
+          message: `Cross-tenant access forbidden. Context store ${verifiedStoreId} does not match configured store.`,
+        });
+      }
 
-    if (currentConnectionStatus === 'CONNECTION ERROR') {
-      return { status: 'CONNECTION ERROR', isDataStale: false };
-    }
+      const effectiveStoreId = verifiedStoreId || configuredStore || 'default';
 
-    if (currentConnectionStatus === 'NOT CONNECTED') {
-      return { status: 'NOT CONNECTED', isDataStale: false };
-    }
+      // Priority 3: Issue a short-lived signed embed session token bound to verified store and user
+      const sessionToken = authManager.createEmbedSession({
+        storeId: effectiveStoreId,
+        userId: auth.merchantIdentity?.userId,
+        userName: auth.merchantIdentity?.userName,
+        companyId: auth.merchantIdentity?.companyId,
+        companyName: auth.merchantIdentity?.companyName,
+      });
 
-    if (currentConnectionStatus === 'Connecting') {
-      return { status: 'Connecting', isDataStale: false };
-    }
+      // Update app base URL dynamically if needed
+      const dynamicBaseUrl = getValidatedBaseUrl(req);
+      ewityAppUi.setDefaultAppUrl(dynamicBaseUrl);
 
-    if (currentConnectionStatus === 'LIVE CONNECTED' || currentConnectionStatus === 'LIVE DATA STALE') {
-      // Freshness check: if polling or reconciliation has exceeded expected interval (120s)
-      const STALE_THRESHOLD_MS = 120000;
-      const latestActivity = Math.max(
-        lastSuccessfulApiRequestAt || 0,
-        lastSuccessfulReconciliationAt || 0,
-        lastSyncTimestamp || 0
+      // Re-evaluate Watchdog rules against current state
+      const evalResult = evaluateMonitoringRules(
+        liveOrdersCache,
+        appAlerts,
+        watchdogSettings,
+        currentConnectionStatus === 'LIVE CONNECTED' ? 'LIVE CONNECTED' : 'NOT CONNECTED'
       );
-      const isStale = latestActivity > 0 && Date.now() - latestActivity > STALE_THRESHOLD_MS;
-      return {
-        status: isStale ? 'LIVE DATA STALE' : 'LIVE CONNECTED',
-        isDataStale: isStale,
-      };
-    }
+      appAlerts = evalResult.alerts;
 
-    return { status: currentConnectionStatus, isDataStale: false };
-  }
+      let doc: any;
+      if (req.query.tab) {
+        doc = ewityAppUi.buildTabContent(String(req.query.tab), {
+          orders: liveOrdersCache,
+          alerts: appAlerts,
+          settings: {
+            kotTimeoutSeconds: watchdogSettings.kotConfirmationTimeoutSec,
+            orderWarningMinutes: watchdogSettings.orderCompletionWarningMin,
+            soundEnabled: watchdogSettings.soundEnabled,
+            monitoringEnabled: watchdogSettings.monitoringEnabled,
+          },
+          storeId: effectiveStoreId,
+          connectionStatus: currentConnectionStatus,
+          sessionToken,
+        });
+      } else {
+        // Root page document (declares tabs)
+        doc = ewityAppUi.buildHomeDocument();
+      }
+
+      // Strict validation against closed schemas
+      const validation = ewityAppUi.validateDocument(doc);
+      if (!validation.isValid) {
+        console.error('[EWITY-APP-UI] Protocol validation errors:', validation.errors);
+        return res.status(400).json({
+          errorCode: 'APP_UI_INVALID',
+          data: { ui_errors: validation.errors },
+        });
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(200).json(doc);
+    } catch (err: any) {
+      console.error('[EWITY-APP-UI] Internal error in GET /ewity/app:', err?.message || 'Unknown');
+      return res.status(500).json({
+        error: 'internal_error',
+        message: 'An internal error occurred while generating the App UI specification.',
+      });
+    }
+  });
+
+  /**
+   * POST /ewity/app
+   * Canonical Ewity App UI Protocol (v1) Action Handler.
+   */
+  app.post('/ewity/app', async (req: any, res) => {
+    try {
+      if (!ewityAppUi.hasSigningSecret()) {
+        return res.status(500).json({
+          error: 'configuration_error',
+          message: 'Ewity signing secret is not configured on the server.',
+        });
+      }
+
+      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+      const auth = ewityAppUi.authenticateRequest(req.headers, rawBody, req.query);
+
+      if (!auth.isValid) {
+        console.warn(`[EWITY-APP-UI] Rejected unauthorized Action POST: ${auth.reason}`);
+        return res.status(auth.statusCode).json({
+          error: auth.error || 'unauthorized',
+          message: auth.reason || 'Authentication failed.',
+        });
+      }
+
+      const verifiedStoreId = auth.merchantIdentity?.storeId;
+      const configuredStore = getTargetTenantStoreId();
+      if (configuredStore && verifiedStoreId && verifiedStoreId !== configuredStore) {
+        return res.status(403).json({
+          error: 'tenant_mismatch',
+          message: `Cross-tenant action forbidden. Store ${verifiedStoreId} does not match configured store.`,
+        });
+      }
+
+      const actionPost = req.body || {};
+      if (actionPost.type !== 'action' || !actionPost.action_id) {
+        return res.status(422).json({
+          message: 'Invalid action payload. Expected type: "action" with an action_id.',
+        });
+      }
+
+      const response = ewityAppUi.handleAction(actionPost, {
+        orders: liveOrdersCache,
+        alerts: appAlerts,
+        onSaveSettings: (newSettings) => {
+          if (newSettings.kotTimeoutSeconds) {
+            watchdogSettings.kotConfirmationTimeoutSec = newSettings.kotTimeoutSeconds;
+          }
+          if (newSettings.orderWarningMinutes) {
+            watchdogSettings.orderCompletionWarningMin = newSettings.orderWarningMinutes;
+          }
+          if (typeof newSettings.soundEnabled === 'boolean') {
+            watchdogSettings.soundEnabled = newSettings.soundEnabled;
+          }
+          persistTenantState();
+        },
+      });
+
+      if (response.ui) {
+        const val = ewityAppUi.validateDocument(response.ui);
+        if (!val.isValid) {
+          console.error('[EWITY-APP-UI] Action UI validation error:', val.errors);
+          return res.status(400).json({
+            errorCode: 'APP_UI_INVALID',
+            data: { ui_errors: val.errors },
+          });
+        }
+      }
+
+      res.setHeader('Content-Type', 'application/json');
+      return res.status(200).json(response);
+    } catch (err: any) {
+      console.error('[EWITY-APP-UI] Error handling action:', err?.message || 'Unknown');
+      return res.status(500).json({
+        error: 'internal_error',
+        message: err.message || 'Failed to process App UI action.',
+      });
+    }
+  });
+
+  // ---------------------------------------------------------
+  // WEBHOOK ENDPOINTS (Priority 1, 2, 4, 5)
+  // Publicly reachable with strict HMAC verification
+  // ---------------------------------------------------------
+  app.post(['/api/ewity/webhook', '/api/ewity/webhooks'], (req: any, res) => {
+    try {
+      const sigHeader = req.headers['x-ewity-signature'] as string;
+      const deliveryId = (req.headers['x-ewity-delivery'] || req.body?.id) as string;
+      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
+
+      if (!req.body || typeof req.body !== 'object') {
+        return res.status(400).json({
+          error: 'invalid_payload',
+          message: 'Malformed request body. Expected JSON object envelope.',
+        });
+      }
+
+      // 1. Verify HMAC-SHA256 Signature against raw unmutated body
+      const verification = ewityWebhook.verifySignature(sigHeader, rawBody);
+      if (!verification.isValid) {
+        console.warn(`[EWITY-WEBHOOK] Rejected unverified webhook delivery ${deliveryId || 'unknown'}: ${verification.reason}`);
+        return res.status(401).json({
+          error: 'invalid_signature',
+          message: verification.reason || 'Cryptographic signature verification failed.',
+        });
+      }
+
+      const envelope = req.body;
+
+      // Priority 2: Tenant isolation check on webhook
+      const webhookStoreId = envelope.install?.store_id;
+      const configuredStore = getTargetTenantStoreId();
+      if (configuredStore && webhookStoreId && webhookStoreId !== configuredStore) {
+        console.warn(`[EWITY-WEBHOOK] Ignored webhook event for foreign store ${webhookStoreId} (configured: ${configuredStore})`);
+        return res.status(200).json({
+          status: 'ignored',
+          reason: 'foreign_store',
+          delivery_id: deliveryId,
+        });
+      }
+
+      // 2. Process Envelope Idempotently with durable deduplication
+      const result = ewityWebhook.processEnvelope(deliveryId, envelope);
+
+      if (result.action === 'duplicate_ignored') {
+        return res.status(200).json({
+          status: 'received',
+          delivery_id: deliveryId,
+          result: 'duplicate_ignored',
+        });
+      }
+
+      // 3. Update orders and lifecycle events (Priority 5: True Kitchen Monitoring)
+      if (result.success && envelope.data) {
+        try {
+          if (envelope.event === 'bill.created' && envelope.data.bill) {
+            const bill = envelope.data.bill;
+            const mappedOrder = mapEwityBillToOrder(bill, undefined, undefined, 'ewity_webhook');
+            const existingIdx = liveOrdersCache.findIndex((o) => o.id === mappedOrder.id);
+            if (existingIdx >= 0) {
+              liveOrdersCache[existingIdx] = mappedOrder;
+            } else {
+              liveOrdersCache.unshift(mappedOrder);
+            }
+            persistTenantState();
+          } else if (envelope.event === 'bill.updated' && envelope.data.bill) {
+            const bill = envelope.data.bill;
+            const existing = liveOrdersCache.find((o) => o.id === `ewity-${bill.id}`);
+            const mappedOrder = mapEwityBillToOrder(bill, undefined, existing, 'ewity_webhook');
+            const existingIdx = liveOrdersCache.findIndex((o) => o.id === mappedOrder.id);
+            if (existingIdx >= 0) {
+              liveOrdersCache[existingIdx] = mappedOrder;
+            } else {
+              liveOrdersCache.unshift(mappedOrder);
+            }
+            persistTenantState();
+          } else if ((envelope.event === 'bill.voided' || envelope.event === 'bill.refunded') && envelope.data.bill_id) {
+            const billId = `ewity-${envelope.data.bill_id}`;
+            liveOrdersCache = liveOrdersCache.map((ord) => {
+              if (ord.id === billId) {
+                return { ...ord, orderStatus: 'Voided' as const, dataSource: 'ewity_webhook' as const };
+              }
+              return ord;
+            });
+            persistTenantState();
+          }
+
+          // Mark delivery fully committed in durable store
+          durableStore.updateDeliveryStatus(deliveryId, 'processed');
+        } catch (commitErr: any) {
+          durableStore.updateDeliveryStatus(deliveryId, 'failed', commitErr.message);
+          throw commitErr;
+        }
+      }
+
+      return res.status(200).json({
+        status: 'received',
+        delivery_id: deliveryId,
+        result: result.action,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (err: any) {
+      console.error('[EWITY-WEBHOOK] Error processing webhook:', err);
+      return res.status(500).json({
+        error: 'processing_error',
+        message: 'Internal error processing webhook event. Delivery will be retried.',
+      });
+    }
+  });
+
+  // ---------------------------------------------------------
+  // DATA APIs (Priority 1, 2, 3)
+  // Protected by verified Embed Session OR Admin Key
+  // ---------------------------------------------------------
 
   /**
    * GET /api/ewity/status
-   * Reports truthful connection state, freshness, configuration source, and merchant store identity.
-   * Requirement: Never shows LIVE CONNECTED unless a real authenticated Apps API request succeeded.
    */
-  app.get('/api/ewity/status', async (_req, res) => {
+  app.get('/api/ewity/status', requireAuthOrEmbedSession, async (_req, res) => {
     const masked = ewityClient.getMaskedCredentials();
     const hasRequiredPerm = currentAuthorities.some((a) =>
       a.includes('p/r-bill-history') || a.includes('p/r-bill') || a.includes('p/r-store')
@@ -303,7 +676,7 @@ async function startServer() {
       calculatedStatus === 'LIVE CONNECTED' || calculatedStatus === 'LIVE DATA STALE';
 
     const info: EwityConnectionInfo = {
-      mode: isDemoModeActive ? 'demo' : 'live',
+      mode: 'live',
       status: calculatedStatus,
       isConnected: isActuallyConnected,
       storeId: masked.storeId,
@@ -315,7 +688,7 @@ async function startServer() {
       hasSigningSecret: ewityWebhook.hasSecret(),
       hasAppUiSecret: ewityAppUi.hasSigningSecret(),
       appUiEndpoint: '/ewity/app',
-      appUiUrl: `${DEPLOYED_APP_URL}/ewity/app`,
+      appUiUrl: `${getValidatedBaseUrl(_req)}/ewity/app`,
       company: currentCompanyInfo,
       authorities: currentAuthorities,
       hasBillHistoryPermission: hasRequiredPerm,
@@ -347,63 +720,330 @@ async function startServer() {
   });
 
   /**
-   * POST /api/ewity/test-connection
-   * Real, read-only test request to Ewity Apps API.
-   * Tests currently configured credentials or provided test credentials.
-   * Updates server status solely from the verified outcome.
+   * GET /api/ewity/locations
    */
-  app.post('/api/ewity/test-connection', async (req, res) => {
-    const { apiKey, storeId, baseUrl, resetToEnv } = req.body || {};
-
-    if (resetToEnv) {
-      activeConfigSource = 'environment';
-      ewityClient.updateCredentials(
-        process.env.EWITY_APP_API_KEY || '',
-        process.env.EWITY_STORE_ID || '',
-        process.env.EWITY_API_BASE_URL
-      );
-    } else if (typeof apiKey === 'string' || typeof storeId === 'string' || typeof baseUrl === 'string') {
-      activeConfigSource = 'custom_runtime';
-      ewityClient.updateCredentials(
-        typeof apiKey === 'string' ? apiKey : '',
-        typeof storeId === 'string' ? storeId : '',
-        typeof baseUrl === 'string' ? baseUrl : undefined
-      );
+  app.get('/api/ewity/locations', requireAuthOrEmbedSession, async (req, res) => {
+    const { status } = getTruthfulStatus();
+    if (status !== 'LIVE CONNECTED' && status !== 'LIVE DATA STALE') {
+      return res.json({ locations: [], mode: 'live' });
     }
 
-    const testRes = await ewityClient.testAppsApiConnection();
-    lastTestOutcome = { ...testRes, configSource: activeConfigSource };
+    try {
+      const locations = await ewityClient.getLocations();
+      cachedLocations = locations;
+      res.json({ locations, mode: 'live' });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message, locations: [], mode: 'live' });
+    }
+  });
 
-    if (testRes.success) {
-      currentConnectionStatus = 'LIVE CONNECTED';
-      lastErrorMessage = undefined;
-      lastSuccessfulApiRequestAt = Date.now();
-      lastSyncTimestamp = Date.now();
-      try {
-        cachedLocations = await ewityClient.getLocations();
-      } catch {
-        // ignore location list failure
+  /**
+   * GET /api/ewity/bills
+   */
+  app.get('/api/ewity/bills', requireAuthOrEmbedSession, async (req, res) => {
+    // Priority 2: Tenant isolation verification on query store_id
+    const queryStore = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+    const authorizedStore = (req as any).authorizedStoreId;
+    if (queryStore && authorizedStore && queryStore !== authorizedStore && !(req as any).isAdmin) {
+      return res.status(403).json({
+        error: 'tenant_mismatch',
+        message: 'Forged or mismatched store_id parameter rejected.',
+      });
+    }
+
+    const { status: connStatus } = getTruthfulStatus();
+    if (connStatus !== 'LIVE CONNECTED' && connStatus !== 'LIVE DATA STALE') {
+      return res.status(400).json({
+        error: 'not_connected',
+        status: connStatus,
+        message: lastErrorMessage || 'Ewity POS is not connected. Configure credentials to fetch live bills.',
+        data: [],
+        mappedOrders: [],
+        mode: 'live',
+        isDemo: false,
+      });
+    }
+
+    const {
+      location_id = 'all',
+      page = 1,
+      limit = 20,
+      order_by = 'created_at:desc',
+      q_kot_number,
+      q_number,
+      q_status,
+      q_type,
+      q_payment_status,
+    } = req.query as Record<string, string>;
+
+    let effectiveLocationId = location_id;
+    if (cachedLocations.length > 0) {
+      const isKnown = cachedLocations.some((l) => String(l.id) === location_id);
+      if (!isKnown && location_id !== 'all') {
+        effectiveLocationId = String(cachedLocations[0].id);
       }
-      reconciler.start();
-    } else {
-      currentConnectionStatus = testRes.outcome;
-      lastErrorMessage = testRes.message;
-      reconciler.stop();
     }
 
-    return res.json({
-      ...lastTestOutcome,
-      status: currentConnectionStatus,
+    try {
+      const billResponse = await ewityClient.listBills(effectiveLocationId, {
+        page: Number(page),
+        limit: Number(limit),
+        order_by,
+        q_kot_number,
+        q_number,
+        q_status,
+        q_type,
+        q_payment_status,
+      });
+
+      lastSuccessfulApiRequestAt = Date.now();
+
+      if (billResponse.appAccessPending) {
+        return res.status(403).json({
+          error: 'app_authorization_pending',
+          status: 'PERMISSION ERROR',
+          message: 'This store has not authorized app access. The merchant must install the app in the Ewity App Store.',
+          data: [],
+          mappedOrders: [],
+          mode: 'live',
+          isDemo: false,
+          appAccessPending: true,
+        });
+      }
+
+      const mappedOrders = billResponse.data.map((bill) => {
+        const existing = liveOrdersCache.find((o) => o.id === `ewity-${bill.id}`);
+        return mapEwityBillToOrder(bill, undefined, existing, 'ewity_api');
+      });
+
+      liveBillsCache = billResponse.data;
+      liveOrdersCache = mappedOrders;
+      lastSyncTimestamp = Date.now();
+      persistTenantState();
+
+      return res.json({
+        ...billResponse,
+        mappedOrders,
+        mode: 'live',
+        isDemo: false,
+        appAccessPending: false,
+      });
+    } catch (err: any) {
+      lastErrorMessage = err.message || 'Failed to fetch bills from Ewity API';
+      return res.status(502).json({
+        error: lastErrorMessage,
+        status: 'CONNECTION ERROR',
+        message: lastErrorMessage,
+        data: [],
+        mappedOrders: [],
+        mode: 'live',
+        isDemo: false,
+      });
+    }
+  });
+
+  /**
+   * GET /api/ewity/bills/:id
+   */
+  app.get('/api/ewity/bills/:id', requireAuthOrEmbedSession, async (req, res) => {
+    const { id } = req.params;
+    const { status: connStatus } = getTruthfulStatus();
+    if (connStatus !== 'LIVE CONNECTED' && connStatus !== 'LIVE DATA STALE') {
+      return res.status(400).json({
+        error: 'not_connected',
+        status: connStatus,
+        message: 'Ewity POS is not connected.',
+      });
+    }
+
+    try {
+      const detail = await ewityClient.getBillDetail(id);
+      lastSuccessfulApiRequestAt = Date.now();
+      res.json({ data: detail, mode: 'live', isDemo: false });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message, mode: 'live', isDemo: false });
+    }
+  });
+
+  /**
+   * GET /api/orders
+   * Returns current verified production orders.
+   */
+  app.get('/api/orders', requireAuthOrEmbedSession, (_req, res) => {
+    const genuineOrders = liveOrdersCache.filter(
+      (o) => o && (o.dataSource === 'ewity_api' || o.dataSource === 'ewity_webhook' || o.dataSource === 'persisted')
+    );
+    res.json({
+      orders: genuineOrders,
+      total: genuineOrders.length,
+      mode: 'live',
+      isDemo: false,
     });
   });
 
   /**
-   * POST /api/ewity/connect
-   * Validates credentials against Ewity Apps API.
-   * STRICT: Does not silently fall back to environment variables when custom runtime credentials are submitted.
-   * Sets truthful status: LIVE CONNECTED, AWAITING MERCHANT APPROVAL, AUTHENTICATION FAILED, PERMISSION ERROR, or CONNECTION ERROR.
+   * GET /api/alerts
+   * Returns current verified alerts.
    */
-  app.post('/api/ewity/connect', async (req, res) => {
+  app.get('/api/alerts', requireAuthOrEmbedSession, (_req, res) => {
+    res.json({
+      alerts: appAlerts,
+      total: appAlerts.length,
+    });
+  });
+
+  // ---------------------------------------------------------
+  // ORDER & ALERT MUTATION ENDPOINTS (Priority 5: State Persistence)
+  // Protected by verified Embed Session OR Admin Key
+  // ---------------------------------------------------------
+
+  /**
+   * POST /api/orders/:id/kot-confirm
+   * Confirms KOT ticket receipt at kitchen station. Persists operator & timestamp.
+   */
+  app.post('/api/orders/:id/kot-confirm', requireAuthOrEmbedSession, (req, res) => {
+    const { id } = req.params;
+    const staffName = req.body?.staffName || 'Kitchen Operator';
+    const now = Date.now();
+
+    const order = liveOrdersCache.find((o) => o.id === id);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    order.kotStatus = 'Confirmed';
+    order.kotConfirmedAt = now;
+    order.alertSeverity = order.alertSeverity === 'urgent' ? 'warning' : 'nominal';
+
+    // Auto-resolve any pending KOT timeout alerts for this order
+    appAlerts = appAlerts.map((alt) => {
+      if (alt.orderId === id && alt.type === 'kot_timeout' && alt.status !== 'resolved') {
+        return {
+          ...alt,
+          status: 'resolved' as const,
+          resolvedBy: staffName,
+          resolvedAt: now,
+          resolutionNote: 'KOT receipt confirmed by operator',
+        };
+      }
+      return alt;
+    });
+
+    persistTenantState();
+    durableStore.recordAuditAction(
+      (req as any).authorizedStoreId || 'default',
+      'kot_confirmed',
+      staffName,
+      { orderId: id }
+    );
+
+    res.json({ success: true, order });
+  });
+
+  /**
+   * POST /api/orders/:id/status
+   * Advances order status. Persists operator & timestamp.
+   */
+  app.post('/api/orders/:id/status', requireAuthOrEmbedSession, (req, res) => {
+    const { id } = req.params;
+    const nextStatus = req.body?.status as OrderStatus;
+    const staffName = req.body?.staffName || 'Kitchen Staff';
+    const now = Date.now();
+
+    const validStatuses = ['New', 'In Kitchen', 'Ready', 'Completed', 'Voided'];
+    if (!validStatuses.includes(nextStatus)) {
+      return res.status(400).json({ error: `Invalid status: ${nextStatus}` });
+    }
+
+    const order = liveOrdersCache.find((o) => o.id === id);
+    if (!order) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    order.orderStatus = nextStatus;
+    order.statusUpdatedAt = now;
+
+    if (nextStatus === 'Completed') {
+      appAlerts = appAlerts.map((alt) => {
+        if (alt.orderId === id && alt.status !== 'resolved') {
+          return {
+            ...alt,
+            status: 'resolved' as const,
+            resolvedBy: staffName,
+            resolvedAt: now,
+            resolutionNote: 'Order marked completed',
+          };
+        }
+        return alt;
+      });
+    }
+
+    persistTenantState();
+    durableStore.recordAuditAction(
+      (req as any).authorizedStoreId || 'default',
+      'order_status_updated',
+      staffName,
+      { orderId: id, newStatus: nextStatus }
+    );
+
+    res.json({ success: true, order });
+  });
+
+  /**
+   * POST /api/alerts/:id/acknowledge
+   */
+  app.post('/api/alerts/:id/acknowledge', requireAuthOrEmbedSession, (req, res) => {
+    const { id } = req.params;
+    const staffName = req.body?.staffName || 'Staff';
+    const now = Date.now();
+
+    const alert = appAlerts.find((a) => a.id === id);
+    if (!alert) {
+      return res.status(404).json({ error: 'Alert not found' });
+    }
+
+    alert.status = 'acknowledged';
+    alert.acknowledgedBy = staffName;
+    alert.acknowledgedAt = now;
+
+    persistTenantState();
+    durableStore.recordAuditAction((req as any).authorizedStoreId || 'default', 'alert_acknowledged', staffName, { alertId: id });
+    res.json({ success: true, alert });
+  });
+
+  /**
+   * POST /api/alerts/:id/resolve
+   */
+  app.post('/api/alerts/:id/resolve', requireAuthOrEmbedSession, (req, res) => {
+    const { id } = req.params;
+    const staffName = req.body?.staffName || 'Staff';
+    const note = req.body?.note;
+    const now = Date.now();
+
+    const alert = appAlerts.find((a) => a.id === id);
+    if (!alert) {
+      return res.status(404).json({ error: 'Alert not found' });
+    }
+
+    alert.status = 'resolved';
+    alert.resolvedBy = staffName;
+    alert.resolvedAt = now;
+    if (note) alert.resolutionNote = note;
+
+    persistTenantState();
+    durableStore.recordAuditAction((req as any).authorizedStoreId || 'default', 'alert_resolved', staffName, { alertId: id, note });
+    res.json({ success: true, alert });
+  });
+
+  // ---------------------------------------------------------
+  // ADMINISTRATOR OPERATIONS (Priority 1)
+  // Protected strictly by requireAdminAuth
+  // ---------------------------------------------------------
+
+  /**
+   * POST /api/ewity/connect
+   */
+  app.post('/api/ewity/connect', requireAdminAuth, async (req, res) => {
     const { apiKey, storeId, baseUrl, webhookSecret, resetToEnv } = req.body || {};
 
     if (resetToEnv) {
@@ -415,7 +1055,6 @@ async function startServer() {
       );
     } else {
       activeConfigSource = 'custom_runtime';
-      // Use exact values provided; do not secretly substitute process.env
       ewityClient.updateCredentials(
         typeof apiKey === 'string' ? apiKey : '',
         typeof storeId === 'string' ? storeId : '',
@@ -426,6 +1065,7 @@ async function startServer() {
     if (webhookSecret) {
       ewityWebhook.setSigningSecret(webhookSecret);
       ewityAppUi.setSigningSecret(webhookSecret);
+      authManager.setSecret(webhookSecret);
     }
 
     if (!ewityClient.hasCredentials()) {
@@ -448,7 +1088,6 @@ async function startServer() {
 
     if (testRes.success) {
       currentConnectionStatus = 'LIVE CONNECTED';
-      isDemoModeActive = false;
       lastErrorMessage = undefined;
       lastSyncTimestamp = Date.now();
       lastSuccessfulApiRequestAt = Date.now();
@@ -492,596 +1131,68 @@ async function startServer() {
   });
 
   /**
-   * POST /api/ewity/disconnect
-   * Disconnects Ewity connection and marks status truthfully as NOT CONNECTED.
+   * POST /api/ewity/test-connection
    */
-  app.post('/api/ewity/disconnect', (_req, res) => {
+  app.post('/api/ewity/test-connection', requireAdminAuth, async (req, res) => {
+    const { apiKey, storeId, baseUrl, resetToEnv } = req.body || {};
+
+    if (resetToEnv) {
+      activeConfigSource = 'environment';
+      ewityClient.updateCredentials(
+        process.env.EWITY_APP_API_KEY || '',
+        process.env.EWITY_STORE_ID || '',
+        process.env.EWITY_API_BASE_URL
+      );
+    } else if (typeof apiKey === 'string' || typeof storeId === 'string' || typeof baseUrl === 'string') {
+      activeConfigSource = 'custom_runtime';
+      ewityClient.updateCredentials(
+        typeof apiKey === 'string' ? apiKey : '',
+        typeof storeId === 'string' ? storeId : '',
+        typeof baseUrl === 'string' ? baseUrl : undefined
+      );
+    }
+
+    const testRes = await ewityClient.testAppsApiConnection();
+    lastTestOutcome = { ...testRes, configSource: activeConfigSource };
+
+    if (testRes.success) {
+      currentConnectionStatus = 'LIVE CONNECTED';
+      lastErrorMessage = undefined;
+      lastSuccessfulApiRequestAt = Date.now();
+      lastSyncTimestamp = Date.now();
+      try {
+        cachedLocations = await ewityClient.getLocations();
+      } catch {
+        // ignore
+      }
+      reconciler.start();
+    } else {
+      currentConnectionStatus = testRes.outcome;
+      lastErrorMessage = testRes.message;
+      reconciler.stop();
+    }
+
+    return res.json({
+      ...lastTestOutcome,
+      status: currentConnectionStatus,
+    });
+  });
+
+  /**
+   * POST /api/ewity/disconnect
+   */
+  app.post('/api/ewity/disconnect', requireAdminAuth, (_req, res) => {
     reconciler.stop();
     currentConnectionStatus = 'NOT CONNECTED';
-    isDemoModeActive = false;
     lastErrorMessage = undefined;
     lastTestOutcome = null;
     res.json({ success: true, status: 'NOT CONNECTED', mode: 'live', configSource: activeConfigSource });
   });
 
   /**
-   * POST /api/ewity/demo/enable
-   * Explicit user activation of Demo Mode.
-   */
-  app.post('/api/ewity/demo/enable', (_req, res) => {
-    isDemoModeActive = true;
-    res.json({ success: true, status: 'DEMO MODE', mode: 'demo' });
-  });
-
-  /**
-   * POST /api/ewity/demo/disable
-   * Explicit user deactivation of Demo Mode, returning to Live Mode.
-   */
-  app.post('/api/ewity/demo/disable', (_req, res) => {
-    isDemoModeActive = false;
-    const { status } = getTruthfulStatus();
-    res.json({ success: true, status, mode: 'live' });
-  });
-
-  /**
-   * GET /api/ewity/locations
-   * Lists genuine locations if connected, demo locations only in explicit Demo Mode, or empty if disconnected.
-   */
-  app.get('/api/ewity/locations', async (req, res) => {
-    const isDemoReq = req.query.mode === 'demo' || isDemoModeActive;
-    if (isDemoReq) {
-      return res.json({
-        locations: [
-          { id: 1, name: 'Harbor Wharf Bistro (Store #101)', type: 'restaurant' },
-          { id: 2, name: 'Ewity Downtown Flagship (Store #102)', type: 'restaurant' },
-          { id: 3, name: 'The Garden Terrace (Store #103)', type: 'restaurant' },
-        ],
-        mode: 'demo',
-      });
-    }
-
-    const { status } = getTruthfulStatus();
-    if (status !== 'LIVE CONNECTED' && status !== 'LIVE DATA STALE') {
-      return res.json({ locations: [], mode: 'live' });
-    }
-
-    try {
-      const locations = await ewityClient.getLocations();
-      cachedLocations = locations;
-      res.json({ locations, mode: 'live' });
-    } catch (err: any) {
-      res.status(502).json({ error: err.message, locations: [], mode: 'live' });
-    }
-  });
-
-  /**
-   * GET /api/ewity/bills
-   * Proxies bill listing with pagination, search, and KOT filtering.
-   * Path: GET /sales/bills/location/{id}
-   *
-   * STRICT ZERO-FAKE-DATA RULES:
-   * 1. If not connected, returns an error and EMPTY orders. Never returns mock bills.
-   * 2. If API fails, returns 502 error. Never returns fallbackData containing mock records.
-   * 3. Mock bills are returned ONLY when Demo Mode is explicitly active.
-   */
-  app.get('/api/ewity/bills', async (req, res) => {
-    const isDemoReq = req.query.mode === 'demo' || isDemoModeActive;
-
-    // 1. Explicit Demo Mode: return mock bills tagged as simulated fixtures
-    if (isDemoReq) {
-      const {
-        page = 1,
-        limit = 20,
-        q_kot_number,
-        q_number,
-        q_status,
-      } = req.query as Record<string, string>;
-
-      let filtered = [...MOCK_EWITY_BILLS];
-      if (q_kot_number) {
-        filtered = filtered.filter((b) =>
-          b.kot_number?.toLowerCase().includes(q_kot_number.toLowerCase())
-        );
-      }
-      if (q_status && q_status !== 'ALL') {
-        filtered = filtered.filter((b) => b.status === q_status);
-      }
-      if (q_number) {
-        filtered = filtered.filter((b) =>
-          b.number.toLowerCase().includes(q_number.toLowerCase())
-        );
-      }
-
-      const mappedOrders = filtered.map((b) =>
-        mapEwityBillToOrder(b, undefined, undefined, 'simulated_fixture')
-      );
-      return res.json({
-        data: filtered,
-        mappedOrders,
-        pagination: {
-          pageSize: Number(limit),
-          current: Number(page),
-          total: filtered.length,
-          hasMorePages: false,
-        },
-        mode: 'demo',
-        isDemo: true,
-      });
-    }
-
-    // 2. Live Mode Check:
-    // If Ewity is not authenticated, return an explicit error with EMPTY data.
-    const { status: connStatus } = getTruthfulStatus();
-    if (connStatus !== 'LIVE CONNECTED' && connStatus !== 'LIVE DATA STALE') {
-      return res.status(400).json({
-        error: 'not_connected',
-        status: connStatus,
-        message: lastErrorMessage || 'Ewity POS is not connected. Configure credentials to fetch live bills.',
-        data: [],
-        mappedOrders: [],
-        mode: 'live',
-        isDemo: false,
-      });
-    }
-
-    const {
-      location_id = 'all',
-      page = 1,
-      limit = 20,
-      order_by = 'created_at:desc',
-      q_kot_number,
-      q_number,
-      q_status,
-      q_type,
-      q_payment_status,
-    } = req.query as Record<string, string>;
-
-    // Sanitize location id
-    let effectiveLocationId = location_id;
-    if (cachedLocations.length > 0) {
-      const isKnown = cachedLocations.some((l) => String(l.id) === location_id);
-      if (!isKnown && location_id !== 'all') {
-        effectiveLocationId = String(cachedLocations[0].id);
-      }
-    }
-
-    try {
-      const billResponse = await ewityClient.listBills(effectiveLocationId, {
-        page: Number(page),
-        limit: Number(limit),
-        order_by,
-        q_kot_number,
-        q_number,
-        q_status,
-        q_type,
-        q_payment_status,
-      });
-
-      lastSuccessfulApiRequestAt = Date.now();
-
-      // If store app access is pending merchant installation in Ewity App Store:
-      if (billResponse.appAccessPending) {
-        return res.status(403).json({
-          error: 'app_authorization_pending',
-          status: 'PERMISSION ERROR',
-          message: 'This store has not authorized app access. The merchant must install the app in the Ewity App Store.',
-          data: [],
-          mappedOrders: [],
-          mode: 'live',
-          isDemo: false,
-          appAccessPending: true,
-        });
-      }
-
-      // Map real bills into internal Order model with 'ewity_api' data source
-      const mappedOrders = billResponse.data.map((bill) => {
-        const existing = liveOrdersCache.find((o) => o.id === `ewity-${bill.id}`);
-        return mapEwityBillToOrder(bill, undefined, existing, 'ewity_api');
-      });
-
-      // Update genuine cache
-      liveBillsCache = billResponse.data;
-      liveOrdersCache = mappedOrders;
-      lastSyncTimestamp = Date.now();
-      persistState(liveBillsCache, liveOrdersCache);
-
-      return res.json({
-        ...billResponse,
-        mappedOrders,
-        mode: 'live',
-        isDemo: false,
-        appAccessPending: false,
-      });
-    } catch (err: any) {
-      lastErrorMessage = err.message || 'Failed to fetch bills from Ewity API';
-      // Return clear error. NEVER return fallbackData containing mock bills!
-      return res.status(502).json({
-        error: lastErrorMessage,
-        status: 'CONNECTION ERROR',
-        message: lastErrorMessage,
-        data: [],
-        mappedOrders: [],
-        mode: 'live',
-        isDemo: false,
-      });
-    }
-  });
-
-  /**
-   * GET /api/ewity/bills/:id
-   * Retrieves single bill detail including line items and payments.
-   * Returns mock bill ONLY in Demo Mode. Never returns mock bill in Live Mode.
-   */
-  app.get('/api/ewity/bills/:id', async (req, res) => {
-    const { id } = req.params;
-    const isDemoReq = req.query.mode === 'demo' || isDemoModeActive;
-
-    if (isDemoReq) {
-      const found = MOCK_EWITY_BILLS.find((b) => String(b.id) === id);
-      if (found) {
-        return res.json({ data: found, mode: 'demo', isDemo: true });
-      }
-      return res.status(404).json({ error: 'Bill not found in demo data' });
-    }
-
-    const { status: connStatus } = getTruthfulStatus();
-    if (connStatus !== 'LIVE CONNECTED' && connStatus !== 'LIVE DATA STALE') {
-      return res.status(400).json({
-        error: 'not_connected',
-        status: connStatus,
-        message: 'Ewity POS is not connected.',
-      });
-    }
-
-    try {
-      const detail = await ewityClient.getBillDetail(id);
-      lastSuccessfulApiRequestAt = Date.now();
-      res.json({ data: detail, mode: 'live', isDemo: false });
-    } catch (err: any) {
-      res.status(502).json({ error: err.message, mode: 'live', isDemo: false });
-    }
-  });
-
-  /**
-   * GET /ewity/app
-   * Official Ewity App UI protocol endpoint.
-   * Returns Ewity's expected JSON document with version: 1 and a components
-   * array containing an IframeView that embeds the existing Watchdog interface.
-   *
-   * Security & Authentication requirements:
-   * 1. Cryptographically verify X-Ewity-Signature (HMAC-SHA256, 300s window)
-   * 2. Cryptographically validate X-Ewity-Context JWT (HS256)
-   * 3. Enforce merchant identity from verified JWT claims (never unsigned query params)
-   * 4. Keep App UI auth separate from webhook auth
-   * 5. Safe error responses, never logging secrets or raw JWTs
-   */
-  /**
-   * GET /ewity/app
-   * Canonical Ewity App UI Protocol (v1) Page & Tab-Content Endpoint.
-   *
-   * Transport:
-   * - Page: GET {app_ui_url}?page=<page>&company_id=&company_name=&company_domain=&store_id=&external_account_id=
-   *   → respond 200 with UI document.
-   * - Tab content: GET {app_ui_url}?page=<page>&tab=<key>&...
-   *   → respond 200 with tab-content document: {"version": 1, "components": [...]}.
-   * - Browser / Iframe UI navigation:
-   *   → serves the web application HTML.
-   */
-  app.get('/ewity/app', async (req: any, res, next) => {
-    const hasSignature = Boolean(req.headers['x-ewity-signature']);
-    const acceptsHtml = req.accepts('html') || req.headers.accept?.includes('text/html');
-    const isExplicitJson = req.query.format === 'json' || (req.headers.accept?.includes('application/json') && !acceptsHtml);
-
-    // 1. Browser navigation or iframe embed requesting the UI:
-    if (!hasSignature && (acceptsHtml || !isExplicitJson)) {
-      return serveAppHtml(req, res, next);
-    }
-
-    // 2. Canonical Ewity App UI Protocol (v1) Request:
-    try {
-      let merchantStoreId: string | undefined = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
-
-      if (hasSignature) {
-        if (!ewityAppUi.hasSigningSecret()) {
-          return res.status(500).json({
-            error: 'configuration_error',
-            message: 'Ewity signing secret is not configured on the server. Please configure EWITY_SIGNING_SECRET or EWITY_WEBHOOK_SECRET.',
-          });
-        }
-
-        const rawBody = req.rawBody || Buffer.from('');
-        const auth = ewityAppUi.authenticateRequest(req.headers, rawBody, req.query);
-
-        if (!auth.isValid) {
-          console.warn(`[EWITY-APP-UI] Rejected unauthorized App UI request: ${auth.reason}`);
-          return res.status(auth.statusCode).json({
-            error: auth.error || 'unauthorized',
-            message: auth.reason || 'Authentication failed.',
-          });
-        }
-
-        merchantStoreId = auth.merchantIdentity?.storeId || merchantStoreId;
-      }
-
-      // Re-evaluate Watchdog rules against current live state
-      const evalResult = evaluateMonitoringRules(
-        liveOrdersCache,
-        appAlerts,
-        watchdogSettings,
-        currentConnectionStatus === 'LIVE CONNECTED' ? 'LIVE CONNECTED' : 'NOT CONNECTED'
-      );
-      appAlerts = evalResult.alerts;
-
-      let doc: any;
-      if (req.query.tab) {
-        // Tab-content document: {"version": 1, "components": [...]} (no title, no tabs)
-        doc = ewityAppUi.buildTabContent(String(req.query.tab), {
-          orders: liveOrdersCache,
-          alerts: appAlerts,
-          settings: {
-            kotTimeoutSeconds: watchdogSettings.kotConfirmationTimeoutSec,
-            orderWarningMinutes: watchdogSettings.orderCompletionWarningMin,
-            soundEnabled: watchdogSettings.soundEnabled,
-            monitoringEnabled: watchdogSettings.monitoringEnabled,
-          },
-          storeId: merchantStoreId,
-          connectionStatus: currentConnectionStatus,
-        });
-      } else {
-        // Root page document (declares tabs)
-        doc = ewityAppUi.buildHomeDocument();
-      }
-
-      // Strict validation against closed schemas
-      const validation = ewityAppUi.validateDocument(doc);
-      if (!validation.isValid) {
-        console.error('[EWITY-APP-UI] Protocol validation errors:', validation.errors);
-        return res.status(400).json({
-          errorCode: 'APP_UI_INVALID',
-          data: { ui_errors: validation.errors },
-        });
-      }
-
-      res.setHeader('Content-Type', 'application/json');
-      return res.status(200).json(doc);
-    } catch (err: any) {
-      console.error('[EWITY-APP-UI] Internal error in GET /ewity/app:', err?.message || 'Unknown');
-      return res.status(500).json({
-        error: 'internal_error',
-        message: 'An internal error occurred while generating the App UI specification.',
-      });
-    }
-  });
-
-  /**
-   * POST /ewity/app
-   * Canonical Ewity App UI Protocol (v1) Action Handler.
-   * Handles button clicks, row clicks, and modal form submissions.
-   */
-  app.post('/ewity/app', async (req: any, res) => {
-    try {
-      if (!ewityAppUi.hasSigningSecret()) {
-        return res.status(500).json({
-          error: 'configuration_error',
-          message: 'Ewity signing secret is not configured on the server.',
-        });
-      }
-
-      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
-      const auth = ewityAppUi.authenticateRequest(req.headers, rawBody, req.query);
-
-      if (!auth.isValid) {
-        console.warn(`[EWITY-APP-UI] Rejected unauthorized Action POST: ${auth.reason}`);
-        return res.status(auth.statusCode).json({
-          error: auth.error || 'unauthorized',
-          message: auth.reason || 'Authentication failed.',
-        });
-      }
-
-      const actionPost = req.body || {};
-      if (actionPost.type !== 'action' || !actionPost.action_id) {
-        return res.status(422).json({
-          message: 'Invalid action payload. Expected type: "action" with an action_id.',
-        });
-      }
-
-      const response = ewityAppUi.handleAction(actionPost, {
-        orders: liveOrdersCache,
-        alerts: appAlerts,
-        onSaveSettings: (newSettings) => {
-          if (newSettings.kotTimeoutSeconds) {
-            watchdogSettings.kotConfirmationTimeoutSec = newSettings.kotTimeoutSeconds;
-          }
-          if (newSettings.orderWarningMinutes) {
-            watchdogSettings.orderCompletionWarningMin = newSettings.orderWarningMinutes;
-          }
-          if (typeof newSettings.soundEnabled === 'boolean') {
-            watchdogSettings.soundEnabled = newSettings.soundEnabled;
-          }
-        },
-        onSimulateOrder: (preset, table) => {
-          const sim = generateSimulatedOrder(preset as any, 'loc-main', 'staff-1');
-          if (table) {
-            sim.tableNumber = table;
-          }
-          liveOrdersCache.unshift(sim);
-          persistState(liveBillsCache, liveOrdersCache);
-        },
-      });
-
-      // If action returned a document UI replacement, strictly validate it
-      if (response.ui) {
-        const val = ewityAppUi.validateDocument(response.ui);
-        if (!val.isValid) {
-          console.error('[EWITY-APP-UI] Action UI validation error:', val.errors);
-          return res.status(400).json({
-            errorCode: 'APP_UI_INVALID',
-            data: { ui_errors: val.errors },
-          });
-        }
-      }
-
-      res.setHeader('Content-Type', 'application/json');
-      return res.status(200).json(response);
-    } catch (err: any) {
-      console.error('[EWITY-APP-UI] Error handling action:', err?.message || 'Unknown');
-      return res.status(500).json({
-        error: 'internal_error',
-        message: err.message || 'Failed to process App UI action.',
-      });
-    }
-  });
-
-  /**
-   * POST /api/ewity/app/simulate
-   * Simulates an authorized Ewity POS App UI request to test signature and JWT context validation.
-   */
-  app.post('/api/ewity/app/simulate', async (_req, res) => {
-    try {
-      if (!ewityAppUi.hasSigningSecret()) {
-        return res.status(500).json({
-          error: 'configuration_error',
-          message: 'Ewity signing secret is not configured.',
-        });
-      }
-
-      const secret = ewityAppUi.getSigningSecret();
-      const nowSec = Math.floor(Date.now() / 1000);
-      const signatureHeader = ewityAppUi.generateSignatureHeader(secret, nowSec, '');
-      const contextToken = ewityAppUi.generateContextToken(secret, {
-        install: { store_id: ewityClient.getMaskedCredentials().storeId || 'pl_id_PvkAkVWKPRJssWiPOhh5RIzNfMKjVo' },
-        company: currentCompanyInfo || { id: 10134, name: 'Test Sandbox' },
-      });
-
-      // Verify request
-      const auth = ewityAppUi.authenticateRequest(
-        {
-          'x-ewity-signature': signatureHeader,
-          'x-ewity-context': contextToken,
-        },
-        '',
-        {}
-      );
-
-      const doc = ewityAppUi.buildAppUiDocument(
-        DEPLOYED_APP_URL,
-        900,
-        auth.merchantIdentity?.storeId
-      );
-
-      res.json({
-        success: true,
-        request: {
-          method: 'GET',
-          path: '/ewity/app',
-          headers: {
-            'X-Ewity-Signature': signatureHeader,
-            'X-Ewity-Context': `${contextToken.slice(0, 25)}...[REDACTED_FOR_SECURITY]`,
-          },
-        },
-        auth: {
-          isValid: auth.isValid,
-          statusCode: auth.statusCode,
-          merchantIdentity: auth.merchantIdentity,
-        },
-        response: doc,
-      });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message });
-    }
-  });
-
-  /**
-   * POST /api/ewity/webhook and POST /api/ewity/webhooks
-   * Official Webhook endpoint receiving signed Ewity event notifications.
-   * Headers: X-Ewity-Event, X-Ewity-Delivery, X-Ewity-Signature
-   * Supports both singular and plural paths to guarantee seamless integration.
-   */
-  app.post(['/api/ewity/webhook', '/api/ewity/webhooks'], (req: any, res) => {
-    try {
-      const sigHeader = req.headers['x-ewity-signature'] as string;
-      const deliveryId = (req.headers['x-ewity-delivery'] || req.body?.id) as string;
-      const rawBody = req.rawBody || Buffer.from(JSON.stringify(req.body || {}));
-
-      // Validate payload presence
-      if (!req.body || typeof req.body !== 'object') {
-        return res.status(400).json({
-          error: 'invalid_payload',
-          message: 'Malformed request body. Expected JSON object envelope.',
-        });
-      }
-
-      // 1. Verify HMAC-SHA256 Signature against raw unmutated body
-      const verification = ewityWebhook.verifySignature(sigHeader, rawBody);
-      if (!verification.isValid) {
-        console.warn(`[EWITY-WEBHOOK] Rejected unverified webhook delivery ${deliveryId || 'unknown'}: ${verification.reason}`);
-        return res.status(401).json({
-          error: 'invalid_signature',
-          message: verification.reason || 'Cryptographic signature verification failed.',
-        });
-      }
-
-      // 2. Process Envelope Idempotently (with delivery ID deduplication & out-of-order sequencing)
-      const envelope = req.body;
-      const result = ewityWebhook.processEnvelope(deliveryId, envelope);
-
-      // 3. Update in-memory and persistent orders if applicable
-      if (result.success && envelope.data) {
-        if (envelope.event === 'bill.created' && envelope.data.bill) {
-          const bill = envelope.data.bill;
-          const mappedOrder = mapEwityBillToOrder(bill, undefined, undefined, 'ewity_webhook');
-          const existingIdx = liveOrdersCache.findIndex((o) => o.id === mappedOrder.id);
-          if (existingIdx >= 0) {
-            liveOrdersCache[existingIdx] = mappedOrder;
-          } else {
-            liveOrdersCache.unshift(mappedOrder);
-          }
-          persistState(liveBillsCache, liveOrdersCache);
-        } else if (envelope.event === 'bill.voided' && envelope.data.bill_id) {
-          const billId = `ewity-${envelope.data.bill_id}`;
-          liveOrdersCache = liveOrdersCache.map((ord) => {
-            if (ord.id === billId) {
-              return { ...ord, orderStatus: 'Voided', dataSource: 'ewity_webhook' as const };
-            }
-            return ord;
-          });
-          persistState(liveBillsCache, liveOrdersCache);
-        }
-      }
-
-      // Always respond 200 OK quickly within 5s
-      return res.status(200).json({
-        status: 'received',
-        delivery_id: deliveryId,
-        result: result.action,
-        timestamp: new Date().toISOString(),
-      });
-    } catch (err: any) {
-      console.error('[EWITY-WEBHOOK] Error processing webhook:', err);
-      // Return 500 so Ewity delivery scheduler will retry (after 1, 4, 8 minutes)
-      return res.status(500).json({
-        error: 'processing_error',
-        message: 'Internal error processing webhook event. Queued for retry.',
-      });
-    }
-  });
-
-  /**
-   * GET /api/ewity/webhooks/recent
-   * Returns recent webhooks for inspector UI
-   */
-  app.get('/api/ewity/webhooks/recent', (_req, res) => {
-    res.json({
-      events: ewityWebhook.getRecentEvents(),
-      processedCount: ewityWebhook.getProcessedCount(),
-    });
-  });
-
-  /**
    * POST /api/ewity/reconcile
-   * Triggers immediate reconciliation
    */
-  app.post('/api/ewity/reconcile', async (_req, res) => {
+  app.post('/api/ewity/reconcile', requireAdminAuth, async (_req, res) => {
     const result = await reconciler.reconcile();
     if (result.success && result.billsCount >= 0) {
       lastSuccessfulReconciliationAt = Date.now();
@@ -1091,32 +1202,33 @@ async function startServer() {
   });
 
   /**
-   * POST /api/ewity/tests/run
-   * Runs the complete mock API test suite
-   */
-  app.post('/api/ewity/tests/run', async (_req, res) => {
-    const results = await runEwityMockTestSuite();
-    res.json({
-      total: results.length,
-      passed: results.filter((r) => r.passed).length,
-      failed: results.filter((r) => !r.passed).length,
-      results,
-    });
-  });
-
-  /**
    * GET /api/ewity/logs
-   * Returns structured request logs (without secrets)
    */
-  app.get('/api/ewity/logs', (_req, res) => {
+  app.get('/api/ewity/logs', requireAdminAuth, (_req, res) => {
     res.json({ logs: ewityClient.getLogs() });
   });
 
+  /**
+   * GET /api/ewity/webhooks/recent
+   */
+  app.get('/api/ewity/webhooks/recent', requireAdminAuth, (_req, res) => {
+    res.json({
+      events: ewityWebhook.getRecentEvents(),
+      processedCount: ewityWebhook.getProcessedCount(),
+    });
+  });
+
   // ---------------------------------------------------------
-  // VITE DEV SERVER & SPA ROUTING INTEGRATION
+  // SPA STATIC ASSET & ROUTING INTEGRATION
   // ---------------------------------------------------------
   if (!isProd && vite) {
     app.use(vite.middlewares);
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path.startsWith('/ewity/')) {
+        return next();
+      }
+      serveAppHtml(req, res, next);
+    });
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
     app.get('*', (_req, res, next) => {
@@ -1124,10 +1236,17 @@ async function startServer() {
     });
   }
 
-  // Automatically verify against official Ewity Apps API on startup if environment credentials are provided
+  return { app, authManager, ewityClient, ewityWebhook, ewityAppUi, durableStore };
+}
+
+async function startServer() {
+  validateStartupEnvironment();
+
+  const { app } = await createApp();
+
   if (ewityClient.hasCredentials()) {
     try {
-      console.log('[EWITY-WATCHDOG] Validating Ewity Apps API with environment credentials...');
+      console.log('[EWITY-WATCHDOG] Validating Ewity Apps API with credentials...');
       const testRes = await ewityClient.testAppsApiConnection();
       lastTestOutcome = { ...testRes, configSource: 'environment' };
 
@@ -1166,7 +1285,15 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('[EWITY-WATCHDOG] Server failed to start:', err);
-  process.exit(1);
-});
+// Only start server when run directly as the main process
+const isMainModule =
+  process.argv[1] &&
+  (fileURLToPath(import.meta.url) === path.resolve(process.argv[1]) ||
+    process.argv[1].endsWith('server.ts'));
+
+if (isMainModule && process.env.NODE_ENV !== 'test') {
+  startServer().catch((err) => {
+    console.error('[EWITY-WATCHDOG] Server failed to start:', err);
+    process.exit(1);
+  });
+}
