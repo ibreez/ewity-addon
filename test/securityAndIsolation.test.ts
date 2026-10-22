@@ -400,6 +400,31 @@ async function main() {
       assert.ok(text.includes('<!doctype html>'), 'HTML must contain doctype');
     });
 
+    await runTest('17. CORS policy strictly validates allowed Ewity origins and rejects wildcards', async () => {
+      // 1. Authorized Ewity POS origin
+      const ewityOrigin = 'https://merchant.ewitypos.com';
+      const resAllowed = await fetch(`${baseUrl}/health`, {
+        headers: { Origin: ewityOrigin },
+      });
+      assert.strictEqual(resAllowed.headers.get('access-control-allow-origin'), ewityOrigin);
+      assert.notStrictEqual(resAllowed.headers.get('access-control-allow-origin'), '*');
+
+      // 2. Preflight from untrusted origin rejected
+      const attackerOrigin = 'https://malicious-attacker-domain.example.com';
+      const preflightRes = await fetch(`${baseUrl}/api/ewity/status`, {
+        method: 'OPTIONS',
+        headers: { Origin: attackerOrigin },
+      });
+      assert.strictEqual(preflightRes.status, 403);
+      assert.strictEqual(preflightRes.headers.get('access-control-allow-origin'), null);
+
+      // 3. Regular request from untrusted origin does NOT receive allow-origin
+      const untrustedRes = await fetch(`${baseUrl}/health`, {
+        headers: { Origin: attackerOrigin },
+      });
+      assert.strictEqual(untrustedRes.headers.get('access-control-allow-origin'), null);
+    });
+
   } finally {
     server.close();
   }

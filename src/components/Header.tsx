@@ -111,11 +111,18 @@ export const Header: React.FC<HeaderProps> = ({
             onChange={(e) => onSelectLocation(e.target.value)}
             className="bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-800 text-xs rounded-md px-2.5 py-1.5 font-medium focus:outline-none focus:ring-1 focus:ring-slate-400 cursor-pointer"
           >
-            {locations.map((loc) => (
-              <option key={loc.id} value={loc.id}>
-                {loc.name}
-              </option>
-            ))}
+            {locations.length > 0 ? (
+              <>
+                <option value="all">All Outlets ({locations.length})</option>
+                {locations.map((loc) => (
+                  <option key={loc.id} value={loc.id}>
+                    {loc.name}
+                  </option>
+                ))}
+              </>
+            ) : (
+              <option value="">No Outlet Configured</option>
+            )}
           </select>
         </div>
       </div>

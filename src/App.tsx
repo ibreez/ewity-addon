@@ -15,8 +15,7 @@ import {
   RestaurantLocation,
 } from './types';
 import {
-  RESTAURANT_LOCATIONS,
-  STAFF_MEMBERS,
+  DEFAULT_STAFF_ROLES,
   loadSavedOrders,
   loadSavedLiveOrders,
   saveOrders,
@@ -46,8 +45,8 @@ export default function App() {
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [settings, setSettings] = useState<MonitoringSettings>(() => loadSavedSettings());
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('NOT CONNECTED');
-  const [currentLocationId, setCurrentLocationId] = useState<string>('loc-main');
-  const [currentStaffId, setCurrentStaffId] = useState<string>('staff-1');
+  const [currentLocationId, setCurrentLocationId] = useState<string>('all');
+  const [currentStaffId, setCurrentStaffId] = useState<string>('role-expo');
   const [currentTime, setCurrentTime] = useState<number>(Date.now());
   const [currentView, setCurrentView] = useState<DashboardView>('active_orders');
 
@@ -141,11 +140,11 @@ export default function App() {
   // Active staff member
   const currentStaff = useMemo(() => {
     return (
-      STAFF_MEMBERS.find((s) => s.id === currentStaffId) || STAFF_MEMBERS[0]
+      DEFAULT_STAFF_ROLES.find((s) => s.id === currentStaffId) || DEFAULT_STAFF_ROLES[0]
     );
   }, [currentStaffId]);
 
-  // Combined locations: merchant locations when available, plus default locations
+  // Combined locations: merchant locations from verified Ewity API only
   const availableLocations = useMemo<RestaurantLocation[]>(() => {
     if (ewityInfo.availableLocations && ewityInfo.availableLocations.length > 0) {
       return ewityInfo.availableLocations.map((loc) => ({
@@ -153,18 +152,19 @@ export default function App() {
         name: loc.name,
         code: `EW-${loc.id}`,
         address: loc.street_address || loc.city || 'Ewity Merchant Outlet',
-        activeStations: ['Kitchen Hot Line #1', 'Pantry & Salad #2', 'Bar Counter'],
+        activeStations: ['Main Kitchen Station'],
       }));
     }
-    return RESTAURANT_LOCATIONS;
+    return [];
   }, [ewityInfo.availableLocations]);
 
   // Current location
   const currentLocation = useMemo(() => {
+    if (availableLocations.length === 0) return undefined;
+    if (currentLocationId === 'all') return availableLocations[0];
     return (
       availableLocations.find((l) => l.id === currentLocationId) ||
-      availableLocations[0] ||
-      RESTAURANT_LOCATIONS[0]
+      availableLocations[0]
     );
   }, [availableLocations, currentLocationId]);
 
@@ -639,7 +639,7 @@ export default function App() {
         locations={availableLocations}
         currentLocationId={currentLocationId}
         onSelectLocation={setCurrentLocationId}
-        staffMembers={STAFF_MEMBERS}
+        staffMembers={DEFAULT_STAFF_ROLES}
         currentStaffId={currentStaffId}
         onSelectStaff={setCurrentStaffId}
         monitoringEnabled={settings.monitoringEnabled}
@@ -660,7 +660,7 @@ export default function App() {
           activeAlertCount={unreadAlertCount}
           activeOrdersCount={metrics.activeOrdersCount}
           totalOrdersCount={metrics.totalOrdersToday}
-          stationName={currentLocation.name}
+          stationName={currentLocation ? currentLocation.name : (ewityInfo.selectedMerchantStore?.name ? `${ewityInfo.selectedMerchantStore.name} (All Outlets)` : 'No Outlet Connected')}
           ewityConnectionStatus={ewityInfo.status}
         />
 
@@ -670,7 +670,7 @@ export default function App() {
           <div className="flex flex-wrap items-center justify-between gap-3 mb-5">
             <div>
               <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
-                <span>{currentLocation.name}</span>
+                <span>{currentLocation ? currentLocation.name : (ewityInfo.selectedMerchantStore?.name || 'All Outlets')}</span>
                 <span>/</span>
                 <span className="text-slate-900 font-semibold capitalize">
                   {currentView.replace(/_/g, ' ')}

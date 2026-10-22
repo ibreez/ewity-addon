@@ -197,16 +197,3 @@ export interface EwityBillListResponse {
   appAccessPending?: boolean;
 }
 
-export interface MockTestResult {
-  id: string;
-  name: string;
-  description: string;
-  category: 'authentication' | 'bills' | 'pagination' | 'rate_limit' | 'webhooks' | 'network' | 'app_ui';
-  passed: boolean;
-  statusCode?: number;
-  durationMs: number;
-  details: string;
-  requestPayload?: any;
-  responsePayload?: any;
-  error?: string;
-}

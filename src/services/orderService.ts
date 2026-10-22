@@ -10,36 +10,17 @@ import {
   MonitoringSettings,
 } from '../types';
 
-export const RESTAURANT_LOCATIONS: RestaurantLocation[] = [
-  {
-    id: 'loc-main',
-    name: 'Harbor Wharf Bistro (Store #101)',
-    code: 'HWB-01',
-    address: 'Pier 24, Embarcadero Suite 100',
-    activeStations: ['Kitchen Hot Line #1', 'Pantry & Salad #2', 'Beverage Bar #1'],
-  },
-  {
-    id: 'loc-downtown',
-    name: 'Ewity Downtown Flagship (Store #102)',
-    code: 'EDF-02',
-    address: '450 Market Street, Level 1',
-    activeStations: ['Expo Hot Line #1', 'Pizza Oven Station', 'Bar Express'],
-  },
-  {
-    id: 'loc-uptown',
-    name: 'The Garden Terrace (Store #103)',
-    code: 'TGT-03',
-    address: '88 Botanic Lane',
-    activeStations: ['Main Kitchen Station', 'Cocktail Lounge Bar'],
-  },
+// Production location list starts empty and is populated strictly from verified Ewity API
+export const RESTAURANT_LOCATIONS: RestaurantLocation[] = [];
+
+// Operational station roles for alert audit trail (customizable by station operators)
+export const DEFAULT_STAFF_ROLES: StaffMember[] = [
+  { id: 'role-expo', name: 'Kitchen Operator', role: 'Floor Supervisor', initials: 'KO' },
+  { id: 'role-chef', name: 'Head Chef', role: 'Head Chef', initials: 'HC' },
+  { id: 'role-manager', name: 'Duty Manager', role: 'Duty Manager', initials: 'DM' },
+  { id: 'role-cashier', name: 'Front Cashier', role: 'Lead Cashier', initials: 'FC' },
 ];
 
-export const STAFF_MEMBERS: StaffMember[] = [
-  { id: 'staff-1', name: 'Sarah Miller', role: 'Duty Manager', initials: 'SM' },
-  { id: 'staff-2', name: 'David Kim', role: 'Head Chef', initials: 'DK' },
-  { id: 'staff-3', name: 'Elena Ramos', role: 'Lead Cashier', initials: 'ER' },
-  { id: 'staff-4', name: 'Marcus Vance', role: 'Floor Supervisor', initials: 'MV' },
-];
 
 export const DEFAULT_MONITORING_SETTINGS: MonitoringSettings = {
   kotConfirmationTimeoutSec: 60,

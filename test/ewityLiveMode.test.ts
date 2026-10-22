@@ -8,8 +8,43 @@ import crypto from 'crypto';
 import { EwityApiClient } from '../src/server/ewityClient';
 import { EwityWebhookService } from '../src/server/ewityWebhook';
 import { mapEwityBillToOrder } from '../src/services/ewityMapper';
-import { MOCK_EWITY_BILLS } from '../src/server/ewityMockFixtures';
 import { EwityBillSummary } from '../src/types/ewity';
+
+const SAMPLE_TEST_BILL: EwityBillSummary = {
+  id: 8634,
+  parent_id: null,
+  number: 'B/8634',
+  location: {
+    id: 1,
+    name: 'Main Kitchen Outlet',
+    display_name: 'Outlet 1',
+    type: 'restaurant',
+  },
+  customer: {
+    id: 104,
+    name: 'Dining Guest',
+  },
+  register_name: 'Hot Line Register #1',
+  restaurant_table: 'T-04',
+  total_sales_price: 68.50,
+  total_tax: 5.48,
+  total_outstanding: 0,
+  total: 73.98,
+  currency: 'USD',
+  status: 'settled',
+  payment_status: 'paid',
+  delivery_status: null,
+  ui_status: { text: 'Settled', color: 'green', hex: '#48BB78' },
+  ui_payment_status: { text: 'Paid', color: 'green', hex: '#48BB78' },
+  type: 'sale',
+  sub_type: null,
+  date: '2026-10-21',
+  created: {
+    at: '2026-10-21 12:00:00',
+    by: 'Duty Operator',
+  },
+  kot_number: 'KOT-9901',
+};
 
 console.log('====================================================');
 console.log(' RUNNING EWITY LIVE DATA & TRUTHFUL MODE REGRESSION SUITE');
@@ -302,11 +337,11 @@ async function runAllTests() {
   // Test 11: Production data provenance is strictly maintained
   await runTest('11. Production data provenance is strictly maintained with authentic sources', () => {
     // Live mode order mapping preserves authentic provenance
-    const liveOrder = mapEwityBillToOrder(MOCK_EWITY_BILLS[0], undefined, undefined, 'ewity_api');
+    const liveOrder = mapEwityBillToOrder(SAMPLE_TEST_BILL, undefined, undefined, 'ewity_api');
     assert.strictEqual(liveOrder.dataSource, 'ewity_api');
     assert.ok(liveOrder.dataTimestamp! > 0);
 
-    const webhookOrder = mapEwityBillToOrder(MOCK_EWITY_BILLS[0], undefined, undefined, 'ewity_webhook');
+    const webhookOrder = mapEwityBillToOrder(SAMPLE_TEST_BILL, undefined, undefined, 'ewity_webhook');
     assert.strictEqual(webhookOrder.dataSource, 'ewity_webhook');
     assert.ok(webhookOrder.dataTimestamp! > 0);
   });

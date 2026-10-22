@@ -91,6 +91,26 @@ async function main() {
       false,
       'src/services/mockOrderService.ts must be deleted from the codebase'
     );
+
+    // Verify ewityMockFixtures is completely removed
+    assert.strictEqual(
+      fs.existsSync(path.join(projectRoot, 'src', 'server', 'ewityMockFixtures.ts')),
+      false,
+      'src/server/ewityMockFixtures.ts must be deleted from the codebase'
+    );
+
+    // Verify server.ts has no wildcard CORS or wildcard frame-ancestors
+    const serverTs = fs.readFileSync(path.join(projectRoot, 'server.ts'), 'utf-8');
+    assert.strictEqual(
+      serverTs.includes("Access-Control-Allow-Origin', '*'"),
+      false,
+      'server.ts must not contain wildcard Access-Control-Allow-Origin: *'
+    );
+    assert.strictEqual(
+      serverTs.includes("frame-ancestors *"),
+      false,
+      'server.ts must not contain wildcard frame-ancestors *'
+    );
   });
 
   const TEST_SECRET = 'whsec_prod_hardening_test_secret_xyz123';
@@ -160,11 +180,36 @@ async function main() {
       assert.ok(['NOT CONFIGURED', 'NOT CONNECTED', 'Connecting'].includes(statusData.status));
     });
 
-    // Test 4: Empty dashboards do not display fabricated metrics
-    await runTest('4. Empty dashboards and unconfigured states do not display fabricated metrics', async () => {
+    // Test 4: Empty dashboards and unconfigured states do not display fabricated metrics, and enforce tenant isolation
+    await runTest('4. Empty dashboards, tenant isolation, and authenticated queries return truthful operational data', async () => {
+      // 1. Unauthenticated calls rejected
+      const unauthOrdersRes = await fetch(`${baseUrl}/api/orders`);
+      assert.strictEqual(unauthOrdersRes.status, 401, 'Unauthenticated /api/orders must return 401');
+
+      const unauthAlertsRes = await fetch(`${baseUrl}/api/alerts`);
+      assert.strictEqual(unauthAlertsRes.status, 401, 'Unauthenticated /api/alerts must return 401');
+
+      // 2. Tenant isolation: embed token for Store A requesting Store B rejected
+      const storeAToken = authManager.createEmbedSession({ storeId: 'store_alpha_123' });
+      const mismatchOrdersRes = await fetch(`${baseUrl}/api/orders?store_id=store_beta_456`, {
+        headers: { Authorization: `Bearer ${storeAToken}` },
+      });
+      assert.strictEqual(mismatchOrdersRes.status, 403, 'Cross-tenant orders query must return 403');
+      const mismatchOrdersData = await mismatchOrdersRes.json();
+      assert.strictEqual(mismatchOrdersData.error, 'tenant_mismatch');
+
+      const mismatchAlertsRes = await fetch(`${baseUrl}/api/alerts?store_id=store_beta_456`, {
+        headers: { Authorization: `Bearer ${storeAToken}` },
+      });
+      assert.strictEqual(mismatchAlertsRes.status, 403, 'Cross-tenant alerts query must return 403');
+      const mismatchAlertsData = await mismatchAlertsRes.json();
+      assert.strictEqual(mismatchAlertsData.error, 'tenant_mismatch');
+
+      // 3. Authorized request returns valid empty list with no fabricated metrics
       const ordersRes = await fetch(`${baseUrl}/api/orders`, {
         headers: { Authorization: `Bearer ${validAdminKey}` },
       });
+      assert.strictEqual(ordersRes.status, 200);
       const ordersData = await ordersRes.json();
       assert.ok(Array.isArray(ordersData.orders));
       // All orders in production must strictly have authentic data source
@@ -177,6 +222,14 @@ async function main() {
         );
         assert.notStrictEqual(order.dataSource, 'simulated_fixture');
       }
+
+      // Check alerts endpoint with valid auth
+      const alertsRes = await fetch(`${baseUrl}/api/alerts`, {
+        headers: { Authorization: `Bearer ${validAdminKey}` },
+      });
+      assert.strictEqual(alertsRes.status, 200);
+      const alertsData = await alertsRes.json();
+      assert.ok(Array.isArray(alertsData.alerts));
     });
 
     // Test 5: Genuine Ewity events and verified records continue to work

@@ -286,6 +286,26 @@ export async function createApp(options: {
   const ALLOWED_FRAME_ANCESTORS =
     "frame-ancestors 'self' https://*.ewitypos.com https://ewitypos.com https://*.ewity.com https://ewity.com https://*.google.com https://*.googleusercontent.com https://*.run.app https://localhost.corp.google.com:26001 http://localhost:*;";
 
+  function isAllowedOrigin(origin?: string): boolean {
+    if (!origin) return false;
+    try {
+      const url = new URL(origin);
+      const host = url.hostname;
+      // Documented Ewity apex domains and subdomains
+      if (host === 'ewitypos.com' || host.endsWith('.ewitypos.com')) return true;
+      if (host === 'ewity.com' || host.endsWith('.ewity.com')) return true;
+      // Authorized preview and embedding origins
+      if (host === 'google.com' || host.endsWith('.google.com')) return true;
+      if (host === 'googleusercontent.com' || host.endsWith('.googleusercontent.com')) return true;
+      if (host.endsWith('.run.app')) return true;
+      // Local development origins
+      if (host === 'localhost' || host === '127.0.0.1' || host === 'localhost.corp.google.com') return true;
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -293,11 +313,23 @@ export async function createApp(options: {
     res.removeHeader('X-Powered-By');
     res.removeHeader('X-Frame-Options');
 
-    // CORS headers for Ewity POS API & Embed
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Ewity-Signature, X-Ewity-Context, X-Ewity-Store, X-Ewity-Session, X-Admin-Key');
+    // Strict CORS: Validate incoming Origin against documented Ewity & preview allowlist
+    const incomingOrigin = req.headers.origin as string | undefined;
+    if (incomingOrigin && isAllowedOrigin(incomingOrigin)) {
+      res.setHeader('Access-Control-Allow-Origin', incomingOrigin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Credentials', 'true');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      res.setHeader(
+        'Access-Control-Allow-Headers',
+        'Content-Type, Authorization, X-Ewity-Signature, X-Ewity-Context, X-Ewity-Store, X-Ewity-Session, X-Admin-Key'
+      );
+    }
+
     if (req.method === 'OPTIONS') {
+      if (incomingOrigin && !isAllowedOrigin(incomingOrigin)) {
+        return res.status(403).json({ error: 'cors_forbidden', message: 'Origin not allowed by CORS policy' });
+      }
       return res.sendStatus(204);
     }
     next();
@@ -867,9 +899,19 @@ export async function createApp(options: {
 
   /**
    * GET /api/orders
-   * Returns current verified production orders.
+   * Returns current verified production orders. Enforces tenant isolation.
    */
-  app.get('/api/orders', requireAuthOrEmbedSession, (_req, res) => {
+  app.get('/api/orders', requireAuthOrEmbedSession, (req, res) => {
+    // Priority 2: Tenant isolation verification on query store_id
+    const queryStore = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+    const authorizedStore = (req as any).authorizedStoreId;
+    if (queryStore && authorizedStore && queryStore !== authorizedStore && !(req as any).isAdmin) {
+      return res.status(403).json({
+        error: 'tenant_mismatch',
+        message: 'Forged or mismatched store_id parameter rejected.',
+      });
+    }
+
     const genuineOrders = liveOrdersCache.filter(
       (o) => o && (o.dataSource === 'ewity_api' || o.dataSource === 'ewity_webhook' || o.dataSource === 'persisted')
     );
@@ -883,9 +925,19 @@ export async function createApp(options: {
 
   /**
    * GET /api/alerts
-   * Returns current verified alerts.
+   * Returns current verified alerts. Enforces tenant isolation.
    */
-  app.get('/api/alerts', requireAuthOrEmbedSession, (_req, res) => {
+  app.get('/api/alerts', requireAuthOrEmbedSession, (req, res) => {
+    // Priority 2: Tenant isolation verification on query store_id
+    const queryStore = typeof req.query.store_id === 'string' ? req.query.store_id : undefined;
+    const authorizedStore = (req as any).authorizedStoreId;
+    if (queryStore && authorizedStore && queryStore !== authorizedStore && !(req as any).isAdmin) {
+      return res.status(403).json({
+        error: 'tenant_mismatch',
+        message: 'Forged or mismatched store_id parameter rejected.',
+      });
+    }
+
     res.json({
       alerts: appAlerts,
       total: appAlerts.length,
