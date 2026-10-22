@@ -184,27 +184,39 @@ export default function App() {
   const fetchEwityStatus = useCallback(async () => {
     try {
       const res = await fetch('/api/ewity/status', {
-        headers: getAuthHeaders(),
+        headers: { Accept: 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
       });
       if (res.ok) {
-        const data = await res.json();
-        setEwityInfo(data);
-        if (data.status) {
-          setConnectionStatus(data.status);
-        }
-        if (data.availableLocations && data.availableLocations.length > 0) {
-          setCurrentLocationId((prev) => {
-            if (prev === 'loc-main' || !data.availableLocations.some((l: any) => String(l.id) === prev)) {
-              return String(data.availableLocations[0].id);
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const data = await res.json();
+          setEwityInfo(data);
+          if (data.adminApiKey && !adminApiKey) {
+            setAdminApiKey(data.adminApiKey);
+            try {
+              sessionStorage.setItem('ewity_admin_key', data.adminApiKey);
+            } catch {
+              // ignore storage errors
             }
-            return prev;
-          });
+          }
+          if (data.status) {
+            setConnectionStatus(data.status);
+          }
+          if (data.availableLocations && data.availableLocations.length > 0) {
+            setCurrentLocationId((prev) => {
+              if (prev === 'all' || prev === 'loc-main' || !data.availableLocations.some((l: any) => String(l.id) === prev)) {
+                return String(data.availableLocations[0].id);
+              }
+              return prev;
+            });
+          }
         }
       }
     } catch {
       // Backend starting up or running client-only
     }
-  }, [getAuthHeaders]);
+  }, [getAuthHeaders, adminApiKey]);
 
   useEffect(() => {
     fetchEwityStatus();
@@ -217,18 +229,22 @@ export default function App() {
     if (ewityInfo.status !== 'LIVE CONNECTED' && ewityInfo.status !== 'LIVE DATA STALE') return;
     try {
       const res = await fetch(`/api/ewity/bills?location_id=${currentLocationId}`, {
-        headers: getAuthHeaders(),
+        headers: { Accept: 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
       });
       if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.mappedOrders)) {
-          // STRICT RULE: If in Live Mode, visible orders must only be genuine live orders!
-          setOrders(data.mappedOrders);
-          saveLiveOrders(data.mappedOrders);
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const data = await res.json();
+          if (Array.isArray(data.mappedOrders)) {
+            // STRICT RULE: If in Live Mode, visible orders must only be genuine live orders!
+            setOrders(data.mappedOrders);
+            saveLiveOrders(data.mappedOrders);
+          }
         }
       }
     } catch {
-      // Graceful fallback
+      // Background sync failed; connection status monitor will update
     }
   }, [ewityInfo.status, currentLocationId, getAuthHeaders]);
 
@@ -541,21 +557,67 @@ export default function App() {
   }, [addToast]);
 
   // Phase 2 Ewity Connect / Disconnect / Reconcile Handlers
-  const handleConnectEwity = async (credentials: { apiKey?: string; storeId?: string; webhookSecret?: string }) => {
+  const handleConnectEwity = async (credentials: {
+    apiKey?: string;
+    storeId?: string;
+    webhookSecret?: string;
+    adminApiKey?: string;
+  }) => {
+    // If an admin key is entered in the credentials form, persist it
+    if (credentials.adminApiKey) {
+      setAdminApiKey(credentials.adminApiKey);
+      try {
+        sessionStorage.setItem('ewity_admin_key', credentials.adminApiKey);
+      } catch {
+        // ignore storage error
+      }
+    }
+
+    const authHeaders = getAuthHeaders();
+    if (credentials.adminApiKey && !authHeaders['Authorization']) {
+      authHeaders['Authorization'] = `Bearer ${credentials.adminApiKey}`;
+      authHeaders['X-Admin-Key'] = credentials.adminApiKey;
+    }
+
     const res = await fetch('/api/ewity/connect', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...authHeaders,
+      },
+      credentials: 'include',
       body: JSON.stringify(credentials),
     });
-    const data = await res.json();
-    if (!res.ok) {
-      throw new Error(data.error || 'Connection failed');
+
+    const contentType = res.headers.get('content-type') || '';
+    let data: any = null;
+    if (contentType.includes('application/json')) {
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
     }
+
+    if (!res.ok) {
+      if (!data) {
+        if (res.status === 401) {
+          throw new Error('Authentication required (401). Administrator API key or valid session required.');
+        } else if (res.status === 403) {
+          throw new Error('Access forbidden (403). Invalid credentials.');
+        } else {
+          throw new Error(`Server returned HTTP ${res.status}: ${res.statusText || 'Unexpected non-JSON response'}`);
+        }
+      }
+      throw new Error(data.error || data.message || 'Connection failed');
+    }
+
     await fetchEwityStatus();
     addToast({
       id: `toast-ewity-conn-${Date.now()}`,
       title: 'Ewity Gateway Connected',
-      message: `Authenticated with ${data.company?.name || 'Ewity Store'}. Role permissions verified.`,
+      message: `Authenticated with ${data?.company?.name || data?.storeId || 'Ewity Store'}. Role permissions verified.`,
       severity: 'info',
       timestamp: Date.now(),
     });
@@ -564,7 +626,8 @@ export default function App() {
   const handleDisconnectEwity = async () => {
     await fetch('/api/ewity/disconnect', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: { Accept: 'application/json', ...getAuthHeaders() },
+      credentials: 'include',
     });
     await fetchEwityStatus();
     setOrders(loadSavedLiveOrders());
@@ -580,9 +643,25 @@ export default function App() {
   const handleReconcileEwity = async () => {
     const res = await fetch('/api/ewity/reconcile', {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers: { Accept: 'application/json', ...getAuthHeaders() },
+      credentials: 'include',
     });
-    const data = await res.json();
+    const contentType = res.headers.get('content-type') || '';
+    const data = contentType.includes('application/json')
+      ? await res.json().catch(() => ({}))
+      : {};
+
+    if (!res.ok) {
+      addToast({
+        id: `toast-ewity-recon-${Date.now()}`,
+        title: 'Reconciliation Notice',
+        message: data?.error || data?.message || `Server returned HTTP ${res.status}`,
+        severity: 'warning',
+        timestamp: Date.now(),
+      });
+      return;
+    }
+
     await syncEwityBills();
     addToast({
       id: `toast-ewity-recon-${Date.now()}`,

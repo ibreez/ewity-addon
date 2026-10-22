@@ -744,6 +744,7 @@ export async function createApp(options: {
       lastError: lastErrorMessage,
       reconciliationActive: reconciler.getStats().isRunning,
       lastReconciliationAt: reconciler.getStats().lastRunAt || undefined,
+      adminApiKey: !isProd || !process.env.ADMIN_API_KEY ? authManager.getAdminApiKey() : undefined,
       lastTestedAt: lastTestOutcome?.testedAt || null,
       testOutcome: lastTestOutcome,
     };
@@ -1107,9 +1108,16 @@ export async function createApp(options: {
       );
     } else {
       activeConfigSource = 'custom_runtime';
+      const existingStore = ewityClient.getMaskedCredentials().storeId;
+      const effectiveStoreId = typeof storeId === 'string' && storeId.trim()
+        ? storeId.trim()
+        : existingStore && !existingStore.includes('(not configured)')
+        ? existingStore
+        : process.env.EWITY_STORE_ID || '';
+
       ewityClient.updateCredentials(
         typeof apiKey === 'string' ? apiKey : '',
-        typeof storeId === 'string' ? storeId : '',
+        effectiveStoreId,
         typeof baseUrl === 'string' ? baseUrl : undefined
       );
     }
@@ -1124,7 +1132,7 @@ export async function createApp(options: {
       currentConnectionStatus = 'NOT CONFIGURED';
       lastErrorMessage = !ewityClient.hasApiKey()
         ? 'Missing EWITY_APP_API_KEY. Please provide the Apps API key.'
-        : 'Missing EWITY_STORE_ID. Please specify the installed merchant store ID.';
+        : 'Missing EWITY_STORE_ID. The Ewity Apps API strictly requires the merchant store ID (e.g. pl_id_...).';
       return res.status(400).json({
         success: false,
         status: currentConnectionStatus,
@@ -1270,6 +1278,14 @@ export async function createApp(options: {
     });
   });
 
+  // Ensure all unhandled /api/* requests return structured JSON 404, never HTML
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      error: 'not_found',
+      message: `API endpoint ${req.method} ${req.path} not found.`,
+    });
+  });
+
   // ---------------------------------------------------------
   // SPA STATIC ASSET & ROUTING INTEGRATION
   // ---------------------------------------------------------
@@ -1283,8 +1299,11 @@ export async function createApp(options: {
     });
   } else {
     app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res, next) => {
-      serveAppHtml(_req, res, next);
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) {
+        return res.status(404).json({ error: 'not_found', message: `API endpoint ${req.path} not found.` });
+      }
+      serveAppHtml(req, res, next);
     });
   }
 

@@ -179,6 +179,7 @@ export interface EwityConnectionInfo {
   hasAppUiSecret?: boolean;
   appUiEndpoint?: string;
   appUiUrl?: string;
+  adminApiKey?: string;
   lastTestedAt?: number | null;
   testOutcome?: TestConnectionResult | null;
 }

@@ -1,6 +1,6 @@
 {
   "storeId": "pl_id_PvkAkVWKPRJssWiPOhh5RIzNfMKjVo",
-  "updatedAt": 1792655384952,
+  "updatedAt": 1792656524052,
   "bills": [],
   "orders": [
     {
@@ -12,10 +12,10 @@
       "createdAt": 1792411200000,
       "kotNumber": "KOT-7788",
       "kotStatus": "Confirmed",
-      "kotConfirmedAt": 1792655384948,
+      "kotConfirmedAt": 1792656524047,
       "kotStation": "Main Location Station",
       "orderStatus": "In Kitchen",
-      "statusUpdatedAt": 1792655384952,
+      "statusUpdatedAt": 1792656524052,
       "items": [
         {
           "id": "bill-item-778899",
@@ -32,7 +32,7 @@
       "alertSeverity": "nominal",
       "activeAlertIds": [],
       "dataSource": "ewity_webhook",
-      "dataTimestamp": 1792655384933
+      "dataTimestamp": 1792656524038
     }
   ],
   "alerts": [],
@@ -47,10 +47,10 @@
   },
   "auditLog": [
     {
-      "id": "audit_1792655384952_bpbxs",
+      "id": "audit_1792656524052_j5hfl",
       "action": "order_status_updated",
       "performedBy": "Chef Michael",
-      "timestamp": 1792655384952,
+      "timestamp": 1792656524052,
       "details": {
         "orderId": "ewity-778899",
         "newStatus": "In Kitchen"

@@ -31,7 +31,7 @@ import { EwityConnectionInfo, EwityBillSummary } from '../types/ewity';
 interface EwityIntegrationViewProps {
   connectionInfo: EwityConnectionInfo | null;
   onRefreshStatus: () => void;
-  onConnect: (credentials: { apiKey?: string; storeId?: string; webhookSecret?: string }) => Promise<void>;
+  onConnect: (credentials: { apiKey?: string; storeId?: string; webhookSecret?: string; adminApiKey?: string }) => Promise<void>;
   onDisconnect: () => Promise<void>;
   onReconcile: () => Promise<void>;
 }
@@ -48,17 +48,35 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
 
   // Manual connect form state
   const [apiKeyInput, setApiKeyInput] = useState<string>('');
-  const [storeIdInput, setStoreIdInput] = useState<string>('');
+  const [storeIdInput, setStoreIdInput] = useState<string>(connectionInfo?.storeId || '');
   const [webhookSecretInput, setWebhookSecretInput] = useState<string>('');
   const [adminKeyInput, setAdminKeyInput] = useState<string>(() => {
     try {
-      return sessionStorage.getItem('ewity_admin_key') || '';
+      return sessionStorage.getItem('ewity_admin_key') || connectionInfo?.adminApiKey || '';
     } catch {
       return '';
     }
   });
   const [connectLoading, setConnectLoading] = useState<boolean>(false);
   const [connectMessage, setConnectMessage] = useState<string | null>(null);
+
+  // Sync storeId and adminKey if received from connection status
+  useEffect(() => {
+    if (connectionInfo?.storeId && !storeIdInput) {
+      setStoreIdInput(connectionInfo.storeId);
+    }
+  }, [connectionInfo?.storeId]);
+
+  useEffect(() => {
+    if (connectionInfo?.adminApiKey && !adminKeyInput) {
+      setAdminKeyInput(connectionInfo.adminApiKey);
+      try {
+        sessionStorage.setItem('ewity_admin_key', connectionInfo.adminApiKey);
+      } catch {
+        // ignore storage errors
+      }
+    }
+  }, [connectionInfo?.adminApiKey]);
 
   // KOT filter & bills browser state
   const [kotFilterInput, setKotFilterInput] = useState<string>('');
@@ -71,7 +89,7 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
   const getAuthHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = {};
     const sessionToken = sessionStorage.getItem('ewity_embed_session');
-    const adminKey = sessionStorage.getItem('ewity_admin_key');
+    const adminKey = adminKeyInput || sessionStorage.getItem('ewity_admin_key');
     if (sessionToken) {
       headers['Authorization'] = `Bearer ${sessionToken}`;
       headers['X-Ewity-Session'] = sessionToken;
@@ -89,9 +107,13 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
       const query = new URLSearchParams();
       if (kotFilterInput) query.set('q_kot_number', kotFilterInput);
       const res = await fetch(`/api/ewity/bills?${query.toString()}`, {
-        headers: getAuthHeaders(),
+        headers: { Accept: 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
       });
-      const data = await res.json();
+      const contentType = res.headers.get('content-type') || '';
+      const data = contentType.includes('application/json')
+        ? await res.json().catch(() => ({}))
+        : {};
       setFetchedBills(data.data || []);
     } catch (err) {
       console.error('Failed to fetch bills:', err);
@@ -104,9 +126,13 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
   const handleFetchWebhooks = async () => {
     try {
       const res = await fetch('/api/ewity/webhooks/recent', {
-        headers: getAuthHeaders(),
+        headers: { Accept: 'application/json', ...getAuthHeaders() },
+        credentials: 'include',
       });
-      const data = await res.json();
+      const contentType = res.headers.get('content-type') || '';
+      const data = contentType.includes('application/json')
+        ? await res.json().catch(() => ({}))
+        : {};
       setRecentWebhooks(data.events || []);
     } catch (err) {
       console.error('Failed to fetch webhooks:', err);
@@ -123,6 +149,7 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
         apiKey: apiKeyInput.trim() || undefined,
         storeId: storeIdInput.trim() || undefined,
         webhookSecret: webhookSecretInput.trim() || undefined,
+        adminApiKey: adminKeyInput.trim() || undefined,
       });
       setConnectMessage('✓ Connection verified successfully.');
     } catch (err: any) {
@@ -419,11 +446,11 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                   <label className="font-semibold text-slate-700">
                     Merchant Store ID (EWITY_STORE_ID)
                   </label>
-                  <span className="text-[10px] text-slate-600">Auto-discovered if left blank</span>
+                  <span className="text-[10px] text-amber-700 font-medium">Required for Apps API (X-Ewity-Store)</span>
                 </div>
                 <input
                   type="text"
-                  placeholder={connectionInfo?.storeId || "e.g. pl_id_rLCD8Ks1rVRGIFs (auto-discovered if empty)"}
+                  placeholder={connectionInfo?.storeId || "e.g. pl_id_PvkAkVWKPRJssWiPOhh5RIzNfMKjVo (from Developer Portal or webhook)"}
                   value={storeIdInput}
                   onChange={(e) => setStoreIdInput(e.target.value)}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs focus:outline-none focus:ring-1 focus:ring-slate-400"
@@ -448,7 +475,9 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                   <label className="font-semibold text-slate-700">
                     Administrator API Key (ADMIN_API_KEY)
                   </label>
-                  <span className="text-[10px] text-slate-500">For managing connection & triggers</span>
+                  <span className="text-[10px] text-slate-500">
+                    {adminKeyInput ? '✓ Auto-configured' : 'Required in production / Optional in dev'}
+                  </span>
                 </div>
                 <input
                   type="password"
@@ -456,7 +485,11 @@ export const EwityIntegrationView: React.FC<EwityIntegrationViewProps> = ({
                   value={adminKeyInput}
                   onChange={(e) => {
                     setAdminKeyInput(e.target.value);
-                    sessionStorage.setItem('ewity_admin_key', e.target.value);
+                    try {
+                      sessionStorage.setItem('ewity_admin_key', e.target.value);
+                    } catch {
+                      // ignore
+                    }
                   }}
                   className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg font-mono text-xs focus:outline-none focus:ring-1 focus:ring-slate-400"
                 />

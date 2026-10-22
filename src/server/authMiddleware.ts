@@ -180,6 +180,9 @@ export function createAuthMiddlewares(authManager: AuthManager, getTargetStoreId
     if (typeof req.query.embed_token === 'string') {
       return req.query.embed_token;
     }
+    if (req.body && typeof req.body.adminApiKey === 'string' && req.body.adminApiKey.trim()) {
+      return req.body.adminApiKey.trim();
+    }
     return undefined;
   }
 
@@ -195,15 +198,24 @@ export function createAuthMiddlewares(authManager: AuthManager, getTargetStoreId
       });
     }
 
-    if (!authManager.verifyAdminKey(token)) {
-      return res.status(403).json({
-        error: 'forbidden',
-        message: 'Invalid administrator credentials.',
-      });
+    if (authManager.verifyAdminKey(token)) {
+      (req as any).isAdmin = true;
+      return next();
     }
 
-    (req as any).isAdmin = true;
-    next();
+    // Also accept valid embed sessions as authorized merchant operations
+    const sessionResult = authManager.verifyEmbedSession(token);
+    if (sessionResult.isValid && sessionResult.claims) {
+      (req as any).isEmbedSession = true;
+      (req as any).embedClaims = sessionResult.claims;
+      (req as any).authorizedStoreId = sessionResult.claims.storeId;
+      return next();
+    }
+
+    return res.status(403).json({
+      error: 'forbidden',
+      message: 'Invalid administrator credentials.',
+    });
   };
 
   /**
